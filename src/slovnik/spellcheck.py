@@ -23,6 +23,14 @@ try:
 except ImportError:
     _HAS_LEVENSHTEIN = False
 
+import unicodedata as _unicodedata
+
+
+def _strip_diacritics(s: str) -> str:
+    """Return ``s`` with combining diacritics removed (e.g. ``'kočka'`` → ``'kocka'``)."""
+    nfkd = _unicodedata.normalize("NFKD", s)
+    return "".join(c for c in nfkd if not _unicodedata.combining(c))
+
 DEFAULT_DICT_DIR = Path(__file__).resolve().parent.parent.parent / "dicts" / "cs_CZ"
 
 
@@ -66,6 +74,16 @@ class SpellChecker:
             return word in self._pure_words
         return True  # graceful no-op
 
+    def suggest(self, word: str, limit: int = 8) -> list[str]:
+        word = (word or "").strip()
+        if not word:
+            return []
+        if self.backend == "hunspell" and self._hunspell_obj is not None:
+            return list(self._hunspell_obj.suggest(word))[:limit]
+        if self.backend == "pure":
+            return _pure_suggest(word, self._pure_word_list, limit)
+        return []
+
 
 def _load_pure_dict(dic_path: Path) -> tuple[frozenset[str], list[str]]:
     """Read cs_CZ.dic; return (set, list) of base forms.
@@ -88,3 +106,59 @@ def _load_pure_dict(dic_path: Path) -> tuple[frozenset[str], list[str]]:
             if base:
                 words.append(base)
     return frozenset(words), words
+
+
+def _pure_suggest(word: str, vocab: list[str], limit: int) -> list[str]:
+    """Suggest up to ``limit`` closest words by edit similarity.
+
+    Scoring (lower is better):
+      1. Levenshtein on the diacritic-stripped, lowercased strings — this
+         rewards candidates that match the input once diacritics are
+         ignored (e.g. ``'kocka'`` → ``'kočka'`` ranks first).
+      2. Levenshtein on the original strings — final disambiguation.
+      3. Alphabetical — deterministic tiebreaker.
+
+    Pre-filters vocab by first character (diacritic-insensitive) and
+    length (±1). With ~260k entries this reduces candidates to a few
+    thousand, making even the ``difflib`` fallback path fast enough for
+    interactive use.
+    """
+    if not vocab:
+        return []
+    target_norm = _strip_diacritics(word).lower()
+    target_first = target_norm[:1] if target_norm else ""
+    wlen = len(word)
+    # Pre-filter: same first diacritic-insensitive char and length within ±1.
+    cands = [
+        w for w in vocab
+        if _strip_diacritics(w)[:1].lower() == target_first
+        and abs(len(w) - wlen) <= 1
+    ]
+    if _HAS_LEVENSHTEIN:
+        scored = [
+            (
+                _lev.distance(target_norm, _strip_diacritics(w).lower()),
+                _lev.distance(word, w),
+                w,
+            )
+            for w in cands
+        ]
+    else:
+        import difflib
+
+        # difflib has no real edit-distance; approximate with 1-ratio so
+        # larger ratio => smaller score (matching the Levenshtein order).
+        scored = [
+            (
+                int(round((1.0 - difflib.SequenceMatcher(
+                    None, target_norm, _strip_diacritics(w).lower()
+                ).ratio()) * 10)),
+                int(round((1.0 - difflib.SequenceMatcher(
+                    None, word, w
+                ).ratio()) * 10)),
+                w,
+            )
+            for w in cands
+        ]
+    scored.sort(key=lambda x: (x[0], x[1], x[2]))
+    return [w for _, _, w in scored[:limit]]

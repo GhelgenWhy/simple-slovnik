@@ -52,6 +52,12 @@ class SpellChecker:
             else:
                 backend = "pure"  # will return no-op results
 
+        if backend == "hunspell" and not _HAS_HUNSPELL:
+            raise RuntimeError(
+                "hunspell backend requested but pyhunspell is not installed; "
+                "run `pip install -e .[spellcheck-hunspell]` or use backend='pure'"
+            )
+
         self.backend = backend
         self._hunspell_obj = None
         self._pure_words: frozenset[str] = frozenset()

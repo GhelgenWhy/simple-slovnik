@@ -73,3 +73,23 @@ def test_suggest_backend_pure_works_without_hunspell():
     assert sc.is_correct("xqzwpf") is False
     sugs = sc.suggest("kocka", limit=5)
     assert "kočka" in sugs
+
+
+def test_backend_auto_picks_pure_when_hunspell_missing(monkeypatch):
+    """When hunspell is not installed, auto must pick pure."""
+    import slovnik.spellcheck as sc_mod
+
+    monkeypatch.setattr(sc_mod, "_HAS_HUNSPELL", False)
+    sc = sc_mod.SpellChecker(backend="auto")
+    # Must be pure even if dict files exist
+    assert sc.backend == "pure"
+
+
+def test_backend_hunspell_raises_helpfully_when_missing(monkeypatch):
+    """If user forces hunspell but it's not installed, must fail clearly."""
+    import pytest
+    import slovnik.spellcheck as sc_mod
+
+    monkeypatch.setattr(sc_mod, "_HAS_HUNSPELL", False)
+    with pytest.raises(RuntimeError, match="hunspell"):
+        sc_mod.SpellChecker(backend="hunspell")

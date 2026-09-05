@@ -7,10 +7,11 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLineEdit, QListWidget, QListWidgetItem, QPushButton,
-    QStatusBar, QMessageBox,
+    QStatusBar, QMessageBox, QFileDialog,
 )
 
 from ..db import init_db, list_words, search_words, delete_word
+from ..import_export import export_csv, import_csv
 from ..models import Word
 
 
@@ -39,6 +40,8 @@ class MainWindow(QMainWindow):
         self.btn_export = QPushButton("📤 Експорт CSV")
 
         self.btn_del.clicked.connect(self._on_delete)
+        self.btn_import.clicked.connect(self._on_import)
+        self.btn_export.clicked.connect(self._on_export)
 
         # --- Layout
         central = QWidget()
@@ -107,4 +110,21 @@ class MainWindow(QMainWindow):
         ans = QMessageBox.question(self, "Видалити?", "Точно видалити це слово?")
         if ans == QMessageBox.Yes:
             delete_word(self.db_path, wid)
+            self._refresh_list()
+
+    def _on_export(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Експорт CSV", "slovnik.csv", "CSV (*.csv)"
+        )
+        if path:
+            n = export_csv(self.db_path, path)
+            self.status.showMessage(f"Експортовано {n} слів")
+
+    def _on_import(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Імпорт CSV", "", "CSV (*.csv)"
+        )
+        if path:
+            n = import_csv(self.db_path, path)
+            self.status.showMessage(f"Імпортовано {n} слів")
             self._refresh_list()

@@ -7,10 +7,10 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLineEdit, QListWidget, QListWidgetItem, QPushButton,
-    QStatusBar,
+    QStatusBar, QMessageBox,
 )
 
-from ..db import init_db, list_words, search_words
+from ..db import init_db, list_words, search_words, delete_word
 from ..models import Word
 
 
@@ -37,6 +37,8 @@ class MainWindow(QMainWindow):
         self.btn_check = QPushButton("✅ Перевірити")
         self.btn_import = QPushButton("📥 Імпорт CSV")
         self.btn_export = QPushButton("📤 Експорт CSV")
+
+        self.btn_del.clicked.connect(self._on_delete)
 
         # --- Layout
         central = QWidget()
@@ -96,3 +98,13 @@ class MainWindow(QMainWindow):
     def _selected_id(self) -> Optional[int]:
         item = self.list_widget.currentItem()
         return int(item.data(Qt.UserRole)) if item else None
+
+    # ----- handlers -----
+    def _on_delete(self) -> None:
+        wid = self._selected_id()
+        if wid is None:
+            return
+        ans = QMessageBox.question(self, "Видалити?", "Точно видалити це слово?")
+        if ans == QMessageBox.Yes:
+            delete_word(self.db_path, wid)
+            self._refresh_list()

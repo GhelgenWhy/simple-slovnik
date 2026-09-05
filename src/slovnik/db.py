@@ -112,3 +112,14 @@ def delete_word(db_path: str, word_id: int) -> None:
     with _connect(db_path) as conn:
         conn.execute("DELETE FROM words WHERE id = ?", (word_id,))
         conn.commit()
+
+
+def list_words(db_path: str, limit: int = 500) -> list[Word]:
+    """Return all words, sorted by ``cs`` (case-insensitive), capped at ``limit``."""
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT id, cs, uk, ru, pos, note, created_at, updated_at "
+            "FROM words ORDER BY cs COLLATE NOCASE LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [_row_to_word(r) for r in rows]

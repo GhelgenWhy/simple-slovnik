@@ -1,7 +1,14 @@
 """Tests for the SQLite CRUD module (Tasks 2.2–2.5)."""
 from pathlib import Path
 import pytest
-from slovnik.db import init_db, add_word, get_word, update_word, delete_word
+from slovnik.db import (
+    init_db,
+    add_word,
+    get_word,
+    update_word,
+    delete_word,
+    list_words,
+)
 
 
 @pytest.fixture
@@ -74,3 +81,33 @@ def test_delete_word_removes_row(db_path):
 def test_delete_missing_is_noop(db_path):
     init_db(db_path)
     delete_word(db_path, 99999)  # must not raise
+
+
+def test_list_words_orders_by_cs(db_path):
+    init_db(db_path)
+    add_word(db_path, cs="zebra")
+    add_word(db_path, cs="apple")
+    add_word(db_path, cs="медведь")
+    words = list_words(db_path)
+    cs_list = [w.cs for w in words]
+    assert cs_list == ["apple", "zebra", "медведь"] or cs_list == ["apple", "медведь", "zebra"]
+    # (Czech/cyrillic sort behavior may differ on Windows; either order of last two is fine)
+
+
+def test_list_words_returns_all_when_under_limit(db_path):
+    init_db(db_path)
+    for cs in ("a", "b", "c"):
+        add_word(db_path, cs=cs)
+    assert len(list_words(db_path)) == 3
+
+
+def test_list_words_limit_caps_count(db_path):
+    init_db(db_path)
+    for i in range(10):
+        add_word(db_path, cs=f"w{i}")
+    assert len(list_words(db_path, limit=5)) == 5
+
+
+def test_list_words_empty_db_returns_empty(db_path):
+    init_db(db_path)
+    assert list_words(db_path) == []

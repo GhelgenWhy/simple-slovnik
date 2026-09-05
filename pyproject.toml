@@ -12,13 +12,23 @@ authors = [{name = "Slovník User"}]
 license = {text = "MIT"}
 dependencies = [
     "PySide6>=6.6",
-    "pyhunspell>=0.5.5",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=7.4",
     "pytest-qt>=4.2",
+]
+# Spellcheck uses a pure-Python fallback by default; pyhunspell is the
+# native-accelerated backend and is only available where pre-built wheels
+# exist (currently no Python 3.11 Windows wheel). On other platforms you can
+# `pip install -e .[spellcheck-hunspell]` for the faster path.
+spellcheck-hunspell = [
+    "pyhunspell>=0.5.5",
+]
+spellcheck-pure = [
+    # pure-Python; Levenshtein is optional, only speeds up suggestions
+    "python-Levenshtein>=0.21",
 ]
 
 [project.scripts]

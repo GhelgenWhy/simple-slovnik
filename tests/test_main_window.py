@@ -153,3 +153,35 @@ def test_main_window_import_adds_words(qtbot, tmp_path, monkeypatch):
     qtbot.waitExposed(win)
     win._on_import()
     assert win.list_widget.count() == 2
+
+
+# ----- Slice 5: app.run() wires QApplication + MainWindow -----
+
+def test_run_function_creates_app_and_window(monkeypatch):
+    """run() must construct QApplication and MainWindow without crashing."""
+    from slovnik import app as app_mod
+
+    show_called = {"v": False}
+    exec_called = {"v": False}
+
+    class FakeWin:
+        def __init__(self, db_path):
+            self.db_path = db_path
+
+        def show(self):
+            show_called["v"] = True
+
+    class FakeApp:
+        def __init__(self, argv):
+            pass
+
+        def exec(self):
+            exec_called["v"] = True
+            return 0
+
+    monkeypatch.setattr(app_mod, "QApplication", FakeApp)
+    monkeypatch.setattr(app_mod, "MainWindow", FakeWin)
+    rc = app_mod.run()
+    assert show_called["v"] is True
+    assert exec_called["v"] is True
+    assert rc == 0

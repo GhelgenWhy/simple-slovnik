@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLineEdit, QListWidget, QListWidgetItem, QPushButton,
@@ -25,6 +25,7 @@ class MainWindow(QMainWindow):
         # --- Search bar
         self.search = QLineEdit()
         self.search.setPlaceholderText("🔍 Пошук: cs / uk / ru…")
+        self.search.textChanged.connect(self._on_search_changed)
 
         # --- List
         self.list_widget = QListWidget()
@@ -58,7 +59,16 @@ class MainWindow(QMainWindow):
         self.status = QStatusBar()
         self.setStatusBar(self.status)
 
+        # --- Debounced search
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(150)
+        self._search_timer.timeout.connect(self._refresh_list)
+
         self._refresh_list()
+
+    def _on_search_changed(self, _text: str) -> None:
+        self._search_timer.start()
 
     # ----- helpers -----
     def _format_word(self, w: Word) -> str:

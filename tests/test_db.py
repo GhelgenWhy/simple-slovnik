@@ -8,6 +8,7 @@ from slovnik.db import (
     update_word,
     delete_word,
     list_words,
+    search_words,
 )
 
 
@@ -111,3 +112,55 @@ def test_list_words_limit_caps_count(db_path):
 def test_list_words_empty_db_returns_empty(db_path):
     init_db(db_path)
     assert list_words(db_path) == []
+
+
+def test_search_empty_query_returns_all(db_path):
+    init_db(db_path)
+    add_word(db_path, cs="kočka")
+    add_word(db_path, cs="pes")
+    assert len(search_words(db_path, "")) == 2
+    assert len(search_words(db_path, "   ")) == 2
+
+
+def test_search_prefix_match_cs(db_path):
+    init_db(db_path)
+    add_word(db_path, cs="kočka")
+    add_word(db_path, cs="kotě")
+    add_word(db_path, cs="pes")
+    results = search_words(db_path, "koč")
+    cs_results = {w.cs for w in results}
+    assert "kočka" in cs_results
+    assert "pes" not in cs_results
+    # (NOTE: "kotě" is in the fixture but cannot match "koč" — "koč" is not a
+    # substring of "kotě". Spec deviation: dropped the "kotě" assertion because
+    # SQLite LIKE is byte-accurate and cannot match. See final report.)
+
+
+def test_search_substring_in_uk(db_path):
+    init_db(db_path)
+    add_word(db_path, cs="cat", uk="кіт домашній")
+    add_word(db_path, cs="dog", uk="собака")
+    results = search_words(db_path, "кіт")
+    assert len(results) >= 1
+    assert any(w.cs == "cat" for w in results)
+
+
+def test_search_substring_in_ru(db_path):
+    init_db(db_path)
+    add_word(db_path, cs="cat", ru="кошка")
+    add_word(db_path, cs="dog", ru="собака")
+    results = search_words(db_path, "кошк")
+    assert any(w.cs == "cat" for w in results)
+
+
+def test_search_no_match_returns_empty(db_path):
+    init_db(db_path)
+    add_word(db_path, cs="kočka")
+    assert search_words(db_path, "xyz") == []
+
+
+def test_search_case_insensitive(db_path):
+    init_db(db_path)
+    add_word(db_path, cs="Kočka")
+    results = search_words(db_path, "koč")
+    assert any(w.cs == "Kočka" for w in results)

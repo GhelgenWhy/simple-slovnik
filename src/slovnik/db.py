@@ -123,3 +123,31 @@ def list_words(db_path: str, limit: int = 500) -> list[Word]:
             (limit,),
         ).fetchall()
         return [_row_to_word(r) for r in rows]
+
+
+def search_words(db_path: str, query: str, limit: int = 100) -> list[Word]:
+    """Case-insensitive substring search over cs/uk/ru.
+
+    An empty / whitespace-only query returns ``list_words(db_path, limit)``.
+    Rows whose ``cs`` starts with the query are ranked first; the rest are
+    ordered by ``cs`` (case-insensitive).
+    """
+    if not query.strip():
+        return list_words(db_path, limit)
+
+    pat = f"%{query}%"
+    prefix_pat = f"{query}%"
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT id, cs, uk, ru, pos, note, created_at, updated_at "
+            "FROM words "
+            "WHERE cs LIKE ? COLLATE NOCASE "
+            "   OR uk LIKE ? COLLATE NOCASE "
+            "   OR ru LIKE ? COLLATE NOCASE "
+            "ORDER BY "
+            "    CASE WHEN cs LIKE ? COLLATE NOCASE THEN 0 ELSE 1 END, "
+            "    cs COLLATE NOCASE "
+            "LIMIT ?",
+            (pat, pat, pat, prefix_pat, limit),
+        ).fetchall()
+        return [_row_to_word(r) for r in rows]

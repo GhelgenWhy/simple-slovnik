@@ -96,12 +96,33 @@ class WordDialog(QDialog):
                                     f"«{word}» — правильно.")
             return
         sugg = sc.suggest(word)
+        # Prefer the suggestion whose diacritic-stripped form equals the
+        # input (e.g. "kocka" → "kočka" rather than "Kocka" or "Kočka").
+        # Cannot import SpellChecker's private helper, so use unicodedata.
+        import unicodedata
+        def _strip(s: str) -> str:
+            return "".join(
+                c for c in unicodedata.normalize("NFKD", s)
+                if not unicodedata.combining(c)
+            ).lower()
+        target = _strip(word)
+        # Prefer case-preserved suggestion: same diacritic-stripped form as
+        # the input AND same case-shape. This picks "kočka" over "Kocka"/
+        # "Kočka" when the user typed "kocka".
+        case_match = next(
+            (s for s in sugg
+             if _strip(s) == target
+             and (s.islower() == word.islower() or s[0:1].islower() == word[0:1].islower())
+             and s != word),
+            None,
+        )
+        best = case_match or (sugg[0] if sugg else "")
         msg = (f"«{word}» — схоже є помилка.\n\nПідказки:\n"
                + ("\n".join(sugg) if sugg else "— немає —"))
         QMessageBox.warning(self, "Перевірка", msg)
-        if sugg:
-            # Pre-fill the best suggestion
-            self.cs.setText(sugg[0])
+        if best:
+            # Pre-fill the best suggestion (case-matched if available)
+            self.cs.setText(best)
 
     # ----- save -----
     def _on_save(self) -> None:

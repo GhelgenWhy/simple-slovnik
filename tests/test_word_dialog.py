@@ -129,3 +129,63 @@ def test_word_dialog_save_updates_existing_word(qtbot, empty_db):
     w = get_word(empty_db, wid)
     assert w.cs == "new"
     assert w.uk == "нове"
+
+
+# ---------- Slice 3: spellcheck button ----------
+
+
+def test_word_dialog_check_correct_word(qtbot, empty_db, monkeypatch):
+    """Click Check with a valid cs word → info dialog shown, no change."""
+    from PySide6.QtWidgets import QMessageBox
+    info_calls = {"count": 0}
+    def fake_info(*a, **kw):
+        info_calls["count"] += 1
+        return QMessageBox.Ok
+    monkeypatch.setattr(QMessageBox, "information", fake_info)
+    monkeypatch.setattr(QMessageBox, "warning", fake_info)
+
+    dlg = WordDialog(None, empty_db, word_id=None)
+    qtbot.addWidget(dlg)
+    dlg.cs.setText("kočka")  # known Czech word
+
+    qtbot.mouseClick(dlg.check_btn, Qt.LeftButton)
+    assert info_calls["count"] == 1
+    # cs field unchanged
+    assert dlg.cs.text() == "kočka"
+
+
+def test_word_dialog_check_incorrect_offers_suggestion(qtbot, empty_db, monkeypatch):
+    """Click Check with bad cs → warning shown, suggestion offered."""
+    from PySide6.QtWidgets import QMessageBox
+    warn_calls = {"count": 0}
+    def fake_warn(*a, **kw):
+        warn_calls["count"] += 1
+        return QMessageBox.Ok
+    monkeypatch.setattr(QMessageBox, "warning", fake_warn)
+    monkeypatch.setattr(QMessageBox, "information", fake_warn)
+
+    dlg = WordDialog(None, empty_db, word_id=None)
+    qtbot.addWidget(dlg)
+    dlg.cs.setText("kocka")  # missing háček — close to "kočka"
+
+    qtbot.mouseClick(dlg.check_btn, Qt.LeftButton)
+    assert warn_calls["count"] == 1
+    # First suggestion should auto-fill the cs field
+    assert dlg.cs.text() == "kočka"
+
+
+def test_word_dialog_check_empty_cs_noop(qtbot, empty_db, monkeypatch):
+    """Click Check with empty cs → no dialog shown."""
+    from PySide6.QtWidgets import QMessageBox
+    called = {"v": False}
+    def fake(*a, **kw):
+        called["v"] = True
+        return QMessageBox.Ok
+    monkeypatch.setattr(QMessageBox, "warning", fake)
+    monkeypatch.setattr(QMessageBox, "information", fake)
+
+    dlg = WordDialog(None, empty_db, word_id=None)
+    qtbot.addWidget(dlg)
+    dlg.cs.setText("")
+    qtbot.mouseClick(dlg.check_btn, Qt.LeftButton)
+    assert not called["v"]

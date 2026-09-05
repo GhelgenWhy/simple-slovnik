@@ -82,3 +82,33 @@ def get_word(db_path: str, word_id: int) -> Word | None:
             (word_id,),
         ).fetchone()
         return _row_to_word(row)
+
+
+# Fields that update_word will accept.
+_UPDATABLE_FIELDS = ("cs", "uk", "ru", "pos", "note")
+
+
+def update_word(db_path: str, word_id: int, **fields) -> None:
+    """Update one or more fields of a row and bump ``updated_at``.
+
+    Unknown field names are silently ignored. Calling with no fields is a no-op.
+    """
+    sets = {k: v for k, v in fields.items() if k in _UPDATABLE_FIELDS}
+    if not sets:
+        return
+    assignments = ", ".join(f"{col} = ?" for col in sets)
+    params: list = list(sets.values()) + [word_id]
+    with _connect(db_path) as conn:
+        conn.execute(
+            f"UPDATE words SET {assignments}, "
+            f"updated_at = datetime('now') WHERE id = ?",
+            params,
+        )
+        conn.commit()
+
+
+def delete_word(db_path: str, word_id: int) -> None:
+    """Delete a row by id. Missing id is silently ignored."""
+    with _connect(db_path) as conn:
+        conn.execute("DELETE FROM words WHERE id = ?", (word_id,))
+        conn.commit()

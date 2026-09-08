@@ -4,13 +4,14 @@ from __future__ import annotations
 from typing import Optional
 
 from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLineEdit, QListWidget, QListWidgetItem, QPushButton,
     QStatusBar, QMessageBox, QFileDialog,
 )
 
-from ..db import init_db, list_words, search_words, delete_word
+from ..db import init_db, list_words, search_words, delete_word, get_word
 from ..import_export import export_csv, import_csv
 from ..models import Word
 
@@ -25,21 +26,25 @@ class MainWindow(QMainWindow):
 
         # --- Search bar
         self.search = QLineEdit()
-        self.search.setPlaceholderText("🔍 Пошук: cs / uk / ru…")
+        self.search.setPlaceholderText("🔍 Пошук: cs / uk / ru…  (Ctrl+F)")
         self.search.textChanged.connect(self._on_search_changed)
 
         # --- List
         self.list_widget = QListWidget()
+        self.list_widget.itemDoubleClicked.connect(self._on_edit)
 
-        # --- Buttons (placeholder wiring — full handlers arrive in later slices)
-        self.btn_add = QPushButton("➕ Додати")
-        self.btn_edit = QPushButton("✏️ Редагувати")
-        self.btn_del = QPushButton("🗑️ Видалити")
+        # --- Buttons
+        self.btn_add = QPushButton("➕ Додати (Ctrl+N)")
+        self.btn_edit = QPushButton("✏️ Редагувати (Enter)")
+        self.btn_del = QPushButton("🗑️ Видалити (Del)")
         self.btn_check = QPushButton("✅ Перевірити")
         self.btn_import = QPushButton("📥 Імпорт CSV")
         self.btn_export = QPushButton("📤 Експорт CSV")
 
+        self.btn_add.clicked.connect(self._on_add)
+        self.btn_edit.clicked.connect(self._on_edit)
         self.btn_del.clicked.connect(self._on_delete)
+        self.btn_check.clicked.connect(self._on_check_selected)
         self.btn_import.clicked.connect(self._on_import)
         self.btn_export.clicked.connect(self._on_export)
 
@@ -64,6 +69,25 @@ class MainWindow(QMainWindow):
         self.status = QStatusBar()
         self.setStatusBar(self.status)
 
+        # --- Hotkeys (ApplicationShortcut so they work regardless of focus)
+        self.act_find = QAction("Find", self)
+        self.act_find.setShortcut(QKeySequence("Ctrl+F"))
+        self.act_find.setShortcutContext(Qt.ApplicationShortcut)
+        self.act_find.triggered.connect(self._on_focus_search)
+        self.addAction(self.act_find)
+
+        self.act_add = QAction("Add", self)
+        self.act_add.setShortcut(QKeySequence("Ctrl+N"))
+        self.act_add.setShortcutContext(Qt.ApplicationShortcut)
+        self.act_add.triggered.connect(self._on_add)
+        self.addAction(self.act_add)
+
+        self.act_delete = QAction("Delete", self)
+        self.act_delete.setShortcut(QKeySequence("Delete"))
+        self.act_delete.setShortcutContext(Qt.ApplicationShortcut)
+        self.act_delete.triggered.connect(self._on_delete)
+        self.addAction(self.act_delete)
+
         # --- Debounced search
         self._search_timer = QTimer(self)
         self._search_timer.setSingleShot(True)
@@ -71,6 +95,11 @@ class MainWindow(QMainWindow):
         self._search_timer.timeout.connect(self._refresh_list)
 
         self._refresh_list()
+
+    # ----- search / focus -----
+    def _on_focus_search(self) -> None:
+        self.search.setFocus()
+        self.search.selectAll()
 
     def _on_search_changed(self, _text: str) -> None:
         self._search_timer.start()
@@ -103,6 +132,22 @@ class MainWindow(QMainWindow):
         return int(item.data(Qt.UserRole)) if item else None
 
     # ----- handlers -----
+    def _on_add(self) -> None:
+        from .word_dialog import WordDialog
+        dlg = WordDialog(self, self.db_path, word_id=None)
+        if dlg.exec():
+            self._refresh_list()
+
+    def _on_edit(self) -> None:
+        wid = self._selected_id()
+        if wid is None:
+            QMessageBox.information(self, "—", "Виберіть слово для редагування.")
+            return
+        from .word_dialog import WordDialog
+        dlg = WordDialog(self, self.db_path, word_id=wid)
+        if dlg.exec():
+            self._refresh_list()
+
     def _on_delete(self) -> None:
         wid = self._selected_id()
         if wid is None:
@@ -111,6 +156,25 @@ class MainWindow(QMainWindow):
         if ans == QMessageBox.Yes:
             delete_word(self.db_path, wid)
             self._refresh_list()
+
+    def _on_check_selected(self) -> None:
+        from ..spellcheck import SpellChecker
+        wid = self._selected_id()
+        if wid is None:
+            QMessageBox.information(self, "—", "Виберіть слово для перевірки.")
+            return
+        w = get_word(self.db_path, wid)
+        if not w:
+            return
+        sc = SpellChecker()
+        if sc.is_correct(w.cs):
+            QMessageBox.information(self, "✅ OK", f"«{w.cs}» — правильно.")
+            return
+        sugg = sc.suggest(w.cs)
+        msg = f"«{w.cs}» — можливо помилка.\n\nПідказки:\n" + (
+            "\n".join(sugg) if sugg else "— немає —"
+        )
+        QMessageBox.warning(self, "Перевірка", msg)
 
     def _on_export(self) -> None:
         path, _ = QFileDialog.getSaveFileName(

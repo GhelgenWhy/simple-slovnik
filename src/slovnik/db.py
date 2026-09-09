@@ -125,6 +125,22 @@ def list_words(db_path: str, limit: int = 500) -> list[Word]:
         return [_row_to_word(r) for r in rows]
 
 
+def iter_words(db_path: str) -> "Iterator[Word]":
+    """Lazily yield ALL words (no limit) — used by the DB audit script."""
+    from collections.abc import Iterator
+
+    conn = _connect(db_path)
+    try:
+        cursor = conn.execute(
+            "SELECT id, cs, uk, ru, pos, note, created_at, updated_at "
+            "FROM words ORDER BY cs COLLATE NOCASE"
+        )
+        for row in cursor:
+            yield _row_to_word(row)
+    finally:
+        conn.close()
+
+
 def search_words(db_path: str, query: str, limit: int = 100) -> list[Word]:
     """Case-insensitive substring search over cs/uk/ru.
 

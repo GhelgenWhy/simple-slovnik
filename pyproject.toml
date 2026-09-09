@@ -33,6 +33,7 @@ spellcheck-pure = [
 
 [project.scripts]
 slovnik = "slovnik.app:run"
+slovnik-dbcheck = "slovnik.db_check:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

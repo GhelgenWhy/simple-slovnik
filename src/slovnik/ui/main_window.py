@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QSettings, QTimer
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -15,12 +15,16 @@ from ..db import init_db, list_words, search_words, delete_word, get_word
 from ..import_export import export_csv, import_csv
 from ..models import Word
 
+_SETTINGS_ORG = "Slovnik"
+_SETTINGS_APP = "slovnik"
+
 
 class MainWindow(QMainWindow):
-    def __init__(self, db_path: str):
+    def __init__(self, db_path: str, settings: Optional[QSettings] = None):
         super().__init__()
         init_db(db_path)
         self.db_path = db_path
+        self._settings = settings or QSettings(_SETTINGS_ORG, _SETTINGS_APP)
         self.setWindowTitle("Slovník — cs ↔ uk/ru")
         self.resize(900, 600)
 
@@ -94,7 +98,39 @@ class MainWindow(QMainWindow):
         self._search_timer.setInterval(150)
         self._search_timer.timeout.connect(self._refresh_list)
 
+        # --- Menu bar: always-on-top mode
+        mbar = self.menuBar()
+        m_view = mbar.addMenu("&Вигляд")
+        self.act_topmost = QAction("📌 Завжди поверх інших вікон", self,
+                                   checkable=True)
+        self.act_topmost.setShortcut(QKeySequence("Ctrl+T"))
+        self.act_topmost.setToolTip(
+            "Тримати вікно над усіма іншими програмами (Ctrl+T). "
+            "Налаштування запам'ятовується.")
+        self.act_topmost.toggled.connect(self._on_topmost_toggled)
+        m_view.addAction(self.act_topmost)
+        if self._settings.value("ui/always_on_top", False, type=bool):
+            self.act_topmost.setChecked(True)  # applies the flag before show
+
         self._refresh_list()
+
+    # ----- always on top -----
+    def is_always_on_top(self) -> bool:
+        return self.act_topmost.isChecked()
+
+    def _on_topmost_toggled(self, on: bool) -> None:
+        on = bool(on)
+        geo = self.geometry()
+        self.setWindowFlag(Qt.WindowStaysOnTopHint, on)
+        if self.isVisible():
+            self.show()
+            self.setGeometry(geo)
+        self._settings.setValue("ui/always_on_top", on)
+        if hasattr(self, "status"):
+            self.status.showMessage(
+                "📌 Поверх інших вікон: увімкнено" if on
+                else "📌 Поверх інших вікон: вимкнено"
+            )
 
     # ----- search / focus -----
     def _on_focus_search(self) -> None:
@@ -158,6 +194,7 @@ class MainWindow(QMainWindow):
             self._refresh_list()
 
     def _on_check_selected(self) -> None:
+        from ..czech import analyze_cs
         from ..spellcheck import SpellChecker
         wid = self._selected_id()
         if wid is None:
@@ -166,15 +203,15 @@ class MainWindow(QMainWindow):
         w = get_word(self.db_path, wid)
         if not w:
             return
-        sc = SpellChecker()
-        if sc.is_correct(w.cs):
+        issues = analyze_cs(w.cs, SpellChecker())
+        if not issues:
             QMessageBox.information(self, "✅ OK", f"«{w.cs}» — правильно.")
             return
-        sugg = sc.suggest(w.cs)
-        msg = f"«{w.cs}» — можливо помилка.\n\nПідказки:\n" + (
-            "\n".join(sugg) if sugg else "— немає —"
-        )
-        QMessageBox.warning(self, "Перевірка", msg)
+        from .check_report import CheckReportDialog
+        dlg = CheckReportDialog(self, issues,
+                                getter=lambda: w.cs,
+                                setter=None, recheck=None)
+        dlg.exec()
 
     def _on_export(self) -> None:
         path, _ = QFileDialog.getSaveFileName(

@@ -155,6 +155,94 @@ def test_main_window_import_adds_words(qtbot, tmp_path, monkeypatch):
     assert win.list_widget.count() == 2
 
 
+# ----- Slice 6: always-on-top mode -----
+
+def _test_settings(tmp_path):
+    from PySide6.QtCore import QSettings
+    return QSettings(str(tmp_path / "settings.ini"), QSettings.IniFormat)
+
+
+def test_always_on_top_default_off(qtbot, seeded_db, tmp_path):
+    win = MainWindow(seeded_db, settings=_test_settings(tmp_path))
+    qtbot.addWidget(win)
+    assert not win.is_always_on_top()
+    assert win.act_topmost.isCheckable()
+
+
+def test_always_on_top_toggle_persists(qtbot, seeded_db, tmp_path):
+    s = _test_settings(tmp_path)
+    win = MainWindow(seeded_db, settings=s)
+    qtbot.addWidget(win)
+    win.act_topmost.setChecked(True)
+    assert win.is_always_on_top()
+    assert s.value("ui/always_on_top", False, type=bool) is True
+    win.act_topmost.setChecked(False)
+    assert not win.is_always_on_top()
+    assert s.value("ui/always_on_top", False, type=bool) is False
+
+
+def test_always_on_top_restored_from_settings(qtbot, seeded_db, tmp_path):
+    s = _test_settings(tmp_path)
+    s.setValue("ui/always_on_top", True)
+    win = MainWindow(seeded_db, settings=s)
+    qtbot.addWidget(win)
+    assert win.is_always_on_top()
+
+
+# ----- Slice 7: check button uses the Czech analyzer -----
+
+def test_check_selected_opens_report_dialog(qtbot, seeded_db, tmp_path,
+                                            monkeypatch):
+    """Selecting a word with a se/si error opens the report dialog."""
+    from slovnik.db import add_word
+
+    captured = {}
+
+    class FakeReport:
+        def __init__(self, parent, issues, getter=None, setter=None,
+                     recheck=None):
+            captured["issues"] = issues
+
+        def exec(self):
+            return 0
+
+    monkeypatch.setattr(
+        "slovnik.ui.check_report.CheckReportDialog", FakeReport)
+
+    add_word(seeded_db, cs="ptát si", uk="запитати")
+    win = MainWindow(seeded_db, settings=_test_settings(tmp_path))
+    qtbot.addWidget(win)
+    win.show()
+    qtbot.waitExposed(win)
+    # select the "ptát si" row
+    for i in range(win.list_widget.count()):
+        if "ptát si" in win.list_widget.item(i).text():
+            win.list_widget.setCurrentRow(i)
+            break
+    win._on_check_selected()
+    assert any(i.kind == "reflexive" for i in captured["issues"])
+
+
+def test_check_selected_correct_word_shows_ok(qtbot, seeded_db, tmp_path,
+                                              monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+    info_calls = {"count": 0}
+
+    def fake_info(*a, **kw):
+        info_calls["count"] += 1
+        return QMessageBox.Ok
+
+    monkeypatch.setattr(QMessageBox, "information", fake_info)
+    monkeypatch.setattr(QMessageBox, "warning", fake_info)
+    win = MainWindow(seeded_db, settings=_test_settings(tmp_path))
+    qtbot.addWidget(win)
+    win.show()
+    qtbot.waitExposed(win)
+    win.list_widget.setCurrentRow(0)  # "kočka"
+    win._on_check_selected()
+    assert info_calls["count"] == 1
+
+
 # ----- Slice 5: app.run() wires QApplication + MainWindow -----
 
 def test_run_function_creates_app_and_window(monkeypatch):

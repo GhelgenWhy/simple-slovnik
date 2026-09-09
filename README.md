@@ -11,8 +11,11 @@ Czech hunspell dictionary.
 | Substring search       | ✅ Done             |
 | CSV import / export    | ✅ Done             |
 | Czech spellcheck + suggestions | ✅ Done (pure-Python fallback) |
+| se/si + preposition checks with fixes | ✅ Done |
+| Always-on-top mode (Ctrl+T) | ✅ Done |
+| Read-only DB audit (`slovnik-dbcheck`) | ✅ Done |
 | Desktop GUI (PySide6)  | ✅ Done             |
-| Cloud sync             | ❌ Roadmap         |
+| Mobile APK + sync via own server | 📋 [Planned](docs/MOBILE_PLAN.md) |
 
 ---
 
@@ -65,12 +68,31 @@ python -m slovnik /path/to/my-vocabulary.db
 
 ---
 
-## Spellcheck
+## Spellcheck & Czech checks
 
 When you press **✅ Перевірити** (or the spellcheck button in the add/edit
 dialog), the selected word is checked against the LibreOffice Czech
-dictionary (`dicts/cs_CZ/`). Misspellings get a list of suggested correct
-forms (powered by Levenshtein distance).
+dictionary (`dicts/cs_CZ/`) **plus** a set of Czech grammar rules.
+Findings open a report dialog; issues with a mechanical fix (se/si,
+prepositions) offer an **✔ Застосувати виправлення** button.
+
+**Checks included:**
+- **Spelling** — dictionary pass with suggestions (typo `kocka` → `kočka`).
+  Common derived forms (`nutně`, `společnost`, `matematicky`) are not
+  flagged — the analyzer knows they come from dictionary base forms.
+- **Reflexive se/si** — a curated table of ~140 frequent verbs. Catches
+  wrong particles (`ptát si` → `ptát se`, `sednout se` → `sednout si`,
+  `všimnout se` → `všimnout si`, `vstát si` → `vstát`) and missing ones
+  (`budu ptát` → `budu se ptát`). Passive/impersonal uses
+  (`vaří se voda`, `Zde se nepracuje`) are never flagged.
+- **Prepositions** — s/se, z/ze, k/ke, v/ve alternation
+  (`s mnou` → `se mnou`, `ze okna` → `z okna`, `ke tobě` → `k tobě`,
+  `v vlaku` → `ve vlaku`). Pronounceable clusters (`v Praze`) are left
+  alone on purpose.
+- **Alphabet mix-ups** — Cyrillic typed into the `cs` field.
+
+The table lives in `src/slovnik/czech.py` (`REFLEXIVES`) — one line per
+verb, with short Ukrainian notes for the se/si meaning differences.
 
 **How it works:**
 - Loads `cs_CZ.dic` (~190 k base forms) into a set
@@ -85,6 +107,32 @@ pip install -e ".[spellcheck-hunspell]"
 ```
 
 It will be auto-detected and used in preference to the pure backend.
+
+---
+
+## Always on top
+
+**Вигляд → 📌 Завжди поверх інших вікон** (or **Ctrl+T**) keeps the
+window above all other applications — handy while reading Czech text.
+The setting is remembered across restarts (QSettings).
+
+---
+
+## DB audit (read-only)
+
+Check the **whole** database for spelling errors, se/si mistakes,
+wrong prepositions, field mix-ups, duplicates and whitespace glitches —
+**without touching a single row** (no auto-correction by design):
+
+```bash
+python -m slovnik.db_check                # data/slovnik.db
+python -m slovnik.db_check my.db --json report.json
+python -m slovnik.db_check --no-spell     # fast, rules only
+```
+
+Exit code is non-zero with `--strict` (useful in scripts/CI).
+After installing the package the same tool is available as
+`slovnik-dbcheck`.
 
 ---
 
@@ -128,8 +176,8 @@ re-export with `utf-8-sig` if Czech/Ukrainian diacritics look broken.
 python -m pytest tests/ -v
 ```
 
-(58 tests covering models, db CRUD, search, CSV, spellcheck,
-main window, and the add/edit dialog.)
+(187 tests covering models, db CRUD, search, CSV, spellcheck,
+Czech se/si & prepositions, main window, dialogs, and the DB audit.)
 
 ### Adding a column
 
@@ -149,6 +197,7 @@ main window, and the add/edit dialog.)
 ```
 simple_slovnik/
 ├── pyproject.toml          # packaging
+├── docs/MOBILE_PLAN.md     # mobile APK + sync plan (not implemented)
 ├── data/slovnik.db         # SQLite DB (created at runtime, gitignored)
 ├── dicts/cs_CZ/            # Czech hunspell dictionary
 │   ├── cs_CZ.aff
@@ -159,10 +208,13 @@ simple_slovnik/
 │   ├── db.py               # SQLite CRUD + search
 │   ├── models.py           # Word dataclass
 │   ├── spellcheck.py       # Czech spellcheck (auto backend)
+│   ├── czech.py            # se/si particles + preposition rules
+│   ├── db_check.py         # read-only whole-DB audit (python -m slovnik.db_check)
 │   ├── import_export.py    # CSV import/export
 │   └── ui/
-│       ├── main_window.py  # main window
-│       └── word_dialog.py  # add/edit dialog
+│       ├── main_window.py  # main window (+ always-on-top mode)
+│       ├── word_dialog.py  # add/edit dialog
+│       └── check_report.py # check-findings report dialog
 └── tests/                  # pytest suite
 ```
 
@@ -214,9 +266,9 @@ is conflict-prone (see roadmap for server-backed option).
 
 ## Roadmap
 
+- [ ] Mobile APK + sync via own server in Tailscale — see
+      [docs/MOBILE_PLAN.md](docs/MOBILE_PLAN.md) (plan ready)
 - [ ] Add a JSON-based "Anki deck" export
-- [ ] Optional cloud sync via a private server (REST + API token)
-- [ ] Mobile / web companion (Flet → web build)
 - [ ] Tag system (categories: grammar, slang, formal, …)
 - [ ] Czech declension helper (shows all 7 cases for a noun)
 - [ ] History view (last N edits)

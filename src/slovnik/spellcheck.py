@@ -31,6 +31,11 @@ def _strip_diacritics(s: str) -> str:
     nfkd = _unicodedata.normalize("NFKD", s)
     return "".join(c for c in nfkd if not _unicodedata.combining(c))
 
+
+def strip_diacritics(s: str) -> str:
+    """Public alias of :func:`_strip_diacritics` for other modules."""
+    return _strip_diacritics(s)
+
 DEFAULT_DICT_DIR = Path(__file__).resolve().parent.parent.parent / "dicts" / "cs_CZ"
 
 

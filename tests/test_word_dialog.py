@@ -154,24 +154,88 @@ def test_word_dialog_check_correct_word(qtbot, empty_db, monkeypatch):
     assert dlg.cs.text() == "kočka"
 
 
-def test_word_dialog_check_incorrect_offers_suggestion(qtbot, empty_db, monkeypatch):
-    """Click Check with bad cs → warning shown, suggestion offered."""
-    from PySide6.QtWidgets import QMessageBox
-    warn_calls = {"count": 0}
-    def fake_warn(*a, **kw):
-        warn_calls["count"] += 1
-        return QMessageBox.Ok
-    monkeypatch.setattr(QMessageBox, "warning", fake_warn)
-    monkeypatch.setattr(QMessageBox, "information", fake_warn)
+def test_word_dialog_check_incorrect_opens_report(qtbot, empty_db, monkeypatch):
+    """Click Check with bad cs → CheckReportDialog with a spelling issue."""
+    captured = {}
+
+    class FakeReport:
+        def __init__(self, parent, issues, getter=None, setter=None,
+                     recheck=None):
+            captured["issues"] = issues
+            captured["setter"] = setter
+
+        def exec(self):
+            return 0
+
+    monkeypatch.setattr(
+        "slovnik.ui.check_report.CheckReportDialog", FakeReport)
 
     dlg = WordDialog(None, empty_db, word_id=None)
     qtbot.addWidget(dlg)
     dlg.cs.setText("kocka")  # missing háček — close to "kočka"
 
     qtbot.mouseClick(dlg.check_btn, Qt.LeftButton)
-    assert warn_calls["count"] == 1
-    # First suggestion should auto-fill the cs field
+    issues = captured["issues"]
+    assert issues and issues[0].kind == "spelling"
+    # The dialog is wired so that Apply writes into the cs field
+    captured["setter"]("kočka")
     assert dlg.cs.text() == "kočka"
+
+
+def test_word_dialog_check_reflexive_error_found(qtbot, empty_db, monkeypatch):
+    """cs = "ptát si" → report contains a reflexive (se/si) issue."""
+    captured = {}
+
+    class FakeReport:
+        def __init__(self, parent, issues, getter=None, setter=None,
+                     recheck=None):
+            captured["issues"] = issues
+
+        def exec(self):
+            return 0
+
+    monkeypatch.setattr(
+        "slovnik.ui.check_report.CheckReportDialog", FakeReport)
+
+    dlg = WordDialog(None, empty_db, word_id=None)
+    qtbot.addWidget(dlg)
+    dlg.cs.setText("ptát si")
+    qtbot.mouseClick(dlg.check_btn, Qt.LeftButton)
+    assert any(i.kind == "reflexive" for i in captured["issues"])
+
+
+def test_word_dialog_save_asks_when_reflexive_error(qtbot, empty_db, monkeypatch):
+    """Saving "ptát si" triggers a confirm; "No" must not write to DB."""
+    from slovnik.db import list_words
+    from PySide6.QtWidgets import QMessageBox
+    monkeypatch.setattr(QMessageBox, "question",
+                        lambda *a, **kw: QMessageBox.No)
+
+    dlg = WordDialog(None, empty_db, word_id=None)
+    qtbot.addWidget(dlg)
+    dlg.cs.setText("ptát si")
+    save_btn = dlg.buttons.button(QDialogButtonBox.Save)
+    qtbot.mouseClick(save_btn, Qt.LeftButton)
+
+    assert dlg.result() != QDialog.Accepted
+    assert len(list_words(empty_db)) == 0
+
+
+def test_word_dialog_save_overrides_reflexive_warning_on_yes(
+        qtbot, empty_db, monkeypatch):
+    from slovnik.db import list_words
+    from PySide6.QtWidgets import QMessageBox
+    monkeypatch.setattr(QMessageBox, "question",
+                        lambda *a, **kw: QMessageBox.Yes)
+
+    dlg = WordDialog(None, empty_db, word_id=None)
+    qtbot.addWidget(dlg)
+    dlg.cs.setText("ptát si")
+    save_btn = dlg.buttons.button(QDialogButtonBox.Save)
+    qtbot.mouseClick(save_btn, Qt.LeftButton)
+
+    assert dlg.result() == QDialog.Accepted
+    assert [w.cs for w in list_words(empty_db)] == ["ptát si"]
 
 
 def test_word_dialog_check_empty_cs_noop(qtbot, empty_db, monkeypatch):

@@ -16,11 +16,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..czech import analyze_cs
 from ..db import add_word, get_word, update_word
 from ..spellcheck import SpellChecker
 
 POS_OPTIONS = ["", "noun", "verb", "adj", "adv", "pron", "prep",
                "conj", "interj", "phrase", "num"]
+
+# Issue kinds worth a confirmation before saving (definite mistakes).
+_HARD_KINDS = ("reflexive", "preposition", "alphabet")
 
 
 class WordDialog(QDialog):
@@ -29,6 +33,7 @@ class WordDialog(QDialog):
         super().__init__(parent)
         self.db_path = db_path
         self.word_id = word_id
+        self._checker: Optional[SpellChecker] = None
         self.setWindowTitle(
             "Редагувати слово" if word_id else "Додати слово"
         )
@@ -86,43 +91,31 @@ class WordDialog(QDialog):
                 self.note.setText(w.note)
 
     # ----- spellcheck -----
+    def _get_checker(self) -> SpellChecker:
+        if self._checker is None:
+            self._checker = SpellChecker()
+        return self._checker
+
+    def _analyze(self, text: str):
+        return analyze_cs(text, self._get_checker())
+
     def _on_check_cs(self) -> None:
         word = self.cs.text().strip()
         if not word:
             return
-        sc = SpellChecker()
-        if sc.is_correct(word):
+        issues = self._analyze(word)
+        if not issues:
             QMessageBox.information(self, "✅ OK",
                                     f"«{word}» — правильно.")
             return
-        sugg = sc.suggest(word)
-        # Prefer the suggestion whose diacritic-stripped form equals the
-        # input (e.g. "kocka" → "kočka" rather than "Kocka" or "Kočka").
-        # Cannot import SpellChecker's private helper, so use unicodedata.
-        import unicodedata
-        def _strip(s: str) -> str:
-            return "".join(
-                c for c in unicodedata.normalize("NFKD", s)
-                if not unicodedata.combining(c)
-            ).lower()
-        target = _strip(word)
-        # Prefer case-preserved suggestion: same diacritic-stripped form as
-        # the input AND same case-shape. This picks "kočka" over "Kocka"/
-        # "Kočka" when the user typed "kocka".
-        case_match = next(
-            (s for s in sugg
-             if _strip(s) == target
-             and (s.islower() == word.islower() or s[0:1].islower() == word[0:1].islower())
-             and s != word),
-            None,
+        from .check_report import CheckReportDialog
+        dlg = CheckReportDialog(
+            self, issues,
+            getter=lambda: self.cs.text().strip(),
+            setter=self.cs.setText,
+            recheck=self._analyze,
         )
-        best = case_match or (sugg[0] if sugg else "")
-        msg = (f"«{word}» — схоже є помилка.\n\nПідказки:\n"
-               + ("\n".join(sugg) if sugg else "— немає —"))
-        QMessageBox.warning(self, "Перевірка", msg)
-        if best:
-            # Pre-fill the best suggestion (case-matched if available)
-            self.cs.setText(best)
+        dlg.exec()
 
     # ----- save -----
     def _on_save(self) -> None:
@@ -130,6 +123,16 @@ class WordDialog(QDialog):
         if not cs:
             QMessageBox.warning(self, "—", "Поле «cs» обов'язкове.")
             return
+        hard = [i for i in self._analyze(cs) if i.kind in _HARD_KINDS]
+        if hard:
+            lines = "\n".join(f"• {i.message}" for i in hard)
+            ans = QMessageBox.question(
+                self, "Можливі помилки",
+                f"Знайдено можливі помилки в чеському записі:\n\n{lines}"
+                f"\n\nЗберегти все одно?",
+            )
+            if ans != QMessageBox.Yes:
+                return
         uk = self.uk.text().strip()
         ru = self.ru.text().strip()
         pos = self.pos.currentText().strip()

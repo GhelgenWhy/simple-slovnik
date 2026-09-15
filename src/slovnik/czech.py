@@ -26,6 +26,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from .issues import KIND_LABELS, Issue  # noqa: F401  (re-exported)
 from .spellcheck import SpellChecker, strip_diacritics
 
 __all__ = [
@@ -284,25 +285,8 @@ def _stripped_index() -> dict[str, str]:
 
 
 # --------------------------------------------------------------------------
-# Issues
+# Issues (shared with other language checkers — defined in ``issues.py``)
 # --------------------------------------------------------------------------
-
-@dataclass
-class Issue:
-    """One finding about a ``cs`` text, with an optional mechanical fix."""
-    kind: str                  # "spelling" | "reflexive" | "preposition" | "alphabet"
-    severity: str              # "error" | "warn" | "info"
-    token: str = ""            # fragment the issue is about
-    message: str = ""          # human-readable (Ukrainian)
-    suggestion: str | None = None  # full corrected text, if mechanically fixable
-
-
-KIND_LABELS = {
-    "spelling": "орфографія",
-    "reflexive": "se/si",
-    "preposition": "прийменник",
-    "alphabet": "алфавіт",
-}
 
 
 # --------------------------------------------------------------------------

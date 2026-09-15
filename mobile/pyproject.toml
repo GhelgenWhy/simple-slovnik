@@ -1,0 +1,30 @@
+[project]
+name = "slovnik-mobile"
+version = "0.1.0"
+description = "Slovník — personal Czech ↔ uk/ru vocabulary (mobile APK)"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+    { name = "Slovník User" }
+]
+dependencies = [
+    "flet>=0.86.5"
+]
+
+[dependency-groups]
+dev = [
+    "flet-cli>=0.86.5",
+    "flet-desktop>=0.86.5",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.flet]
+org = "cz.slovnik"
+product = "Slovník"
+company = "Slovník"
+copyright = "Copyright (C) 2026 Slovník"
+
+[tool.flet.app]
+path = "src"

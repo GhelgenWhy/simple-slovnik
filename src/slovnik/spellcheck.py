@@ -46,8 +46,10 @@ class SpellChecker:
         backend: Literal["auto", "hunspell", "pure"] = "auto",
     ) -> None:
         self.dict_dir = Path(dict_dir) if dict_dir else DEFAULT_DICT_DIR
-        self.aff_path = self.dict_dir / "cs_CZ.aff"
-        self.dic_path = self.dict_dir / "cs_CZ.dic"
+        # File names derive from the directory name (``cs_CZ`` / ``en_US``),
+        # so one SpellChecker serves any bundled hunspell dictionary.
+        self.aff_path = self.dict_dir / f"{self.dict_dir.name}.aff"
+        self.dic_path = self.dict_dir / f"{self.dict_dir.name}.dic"
 
         if backend == "auto":
             if _HAS_HUNSPELL and self.aff_path.exists() and self.dic_path.exists():

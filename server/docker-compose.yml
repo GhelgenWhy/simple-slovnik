@@ -1,0 +1,24 @@
+# Slovník sync server — tailnet-only by design.
+#
+# Before first start:
+#   1. generate a token:  python -c "import secrets; print(secrets.token_hex(32))"
+#   2. put it into SLOVNIK_TOKEN below (or in a .env file next to this file)
+#   3. docker compose up -d --build
+#
+# The port mapping publishes on all host interfaces; prefer binding to the
+# tailnet address only, e.g. "100.x.y.z:8000:8000" (MagicDNS IP of this
+# machine), so the service is unreachable from the LAN/WAN.
+services:
+  slovnik-sync:
+    build: .
+    restart: unless-stopped
+    environment:
+      SLOVNIK_TOKEN: "CHANGE-ME"
+      SLOVNIK_DB: /data/server.db
+    volumes:
+      - slovnik-data:/data
+    ports:
+      - "8000:8000"   # restrict to the tailnet IP, see note above
+
+volumes:
+  slovnik-data:

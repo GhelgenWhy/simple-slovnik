@@ -1,19 +1,24 @@
-"""Main application window — search + list + CRUD controls."""
+"""Main application window — shell hosting per-language vocabulary pages.
+
+Each language (Czech ``cs``, English ``en``) is an independent
+:class:`~slovnik.ui.vocabulary_page.VocabularyPage` tab with identical
+UI; the shell owns the always-on-top mode, the shared status bar and the
+keyboard shortcuts (applied to the active tab).
+
+For backward compatibility the shell delegates any attribute it doesn't
+define to the **Czech** page (``list_widget``, ``search``, the ``_on_*``
+handlers, …), so legacy callers and tests keep working unchanged.
+"""
 from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtCore import Qt, QSettings, QTimer
+from PySide6.QtCore import Qt, QSettings
 from PySide6.QtGui import QAction, QKeySequence
-from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLineEdit, QListWidget, QListWidgetItem, QPushButton,
-    QStatusBar, QMessageBox, QFileDialog,
-)
+from PySide6.QtWidgets import QMainWindow, QStatusBar, QTabWidget
 
-from ..db import init_db, list_words, search_words, delete_word, get_word
-from ..import_export import export_csv, import_csv
-from ..models import Word
+from ..db import init_db
+from .vocabulary_page import VocabularyPage
 
 _SETTINGS_ORG = "Slovnik"
 _SETTINGS_APP = "slovnik"
@@ -28,77 +33,41 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Slovník — cs ↔ uk/ru")
         self.resize(900, 600)
 
-        # --- Search bar
-        self.search = QLineEdit()
-        self.search.setPlaceholderText("🔍 Пошук: cs / uk / ru…  (Ctrl+F)")
-        self.search.textChanged.connect(self._on_search_changed)
-
-        # --- List
-        self.list_widget = QListWidget()
-        self.list_widget.itemDoubleClicked.connect(self._on_edit)
-
-        # --- Buttons
-        self.btn_add = QPushButton("➕ Додати (Ctrl+N)")
-        self.btn_edit = QPushButton("✏️ Редагувати (Enter)")
-        self.btn_del = QPushButton("🗑️ Видалити (Del)")
-        self.btn_check = QPushButton("✅ Перевірити")
-        self.btn_import = QPushButton("📥 Імпорт CSV")
-        self.btn_export = QPushButton("📤 Експорт CSV")
-
-        self.btn_add.clicked.connect(self._on_add)
-        self.btn_edit.clicked.connect(self._on_edit)
-        self.btn_del.clicked.connect(self._on_delete)
-        self.btn_check.clicked.connect(self._on_check_selected)
-        self.btn_import.clicked.connect(self._on_import)
-        self.btn_export.clicked.connect(self._on_export)
-
-        # --- Layout
-        central = QWidget()
-        layout = QVBoxLayout(central)
-        top = QHBoxLayout()
-        top.addWidget(self.search, 1)
-        top.addWidget(self.btn_check, 0)
-        layout.addLayout(top)
-        layout.addWidget(self.list_widget, 1)
-        bottom = QHBoxLayout()
-        bottom.addWidget(self.btn_add)
-        bottom.addWidget(self.btn_edit)
-        bottom.addWidget(self.btn_del)
-        bottom.addStretch(1)
-        bottom.addWidget(self.btn_import)
-        bottom.addWidget(self.btn_export)
-        layout.addLayout(bottom)
-        self.setCentralWidget(central)
-
         self.status = QStatusBar()
         self.setStatusBar(self.status)
 
-        # --- Hotkeys (ApplicationShortcut so they work regardless of focus)
+        # --- Per-language tabs (Czech page owns the sync buttons)
+        self.tabs = QTabWidget()
+        self.page_cs = VocabularyPage(
+            self, db_path, lang="cs", settings=self._settings,
+            status=self.status, with_sync=True)
+        self.page_en = VocabularyPage(
+            self, db_path, lang="en", settings=self._settings,
+            status=self.status, with_sync=False)
+        self.tabs.addTab(self.page_cs, "🇨🇿 Чеський")
+        self.tabs.addTab(self.page_en, "🇬🇧 English")
+        self.setCentralWidget(self.tabs)
+
+        # --- Hotkeys (ApplicationShortcut → applied to the active tab)
         self.act_find = QAction("Find", self)
         self.act_find.setShortcut(QKeySequence("Ctrl+F"))
         self.act_find.setShortcutContext(Qt.ApplicationShortcut)
-        self.act_find.triggered.connect(self._on_focus_search)
+        self.act_find.triggered.connect(self._on_focus_search_active)
         self.addAction(self.act_find)
 
         self.act_add = QAction("Add", self)
         self.act_add.setShortcut(QKeySequence("Ctrl+N"))
         self.act_add.setShortcutContext(Qt.ApplicationShortcut)
-        self.act_add.triggered.connect(self._on_add)
+        self.act_add.triggered.connect(self._on_add_active)
         self.addAction(self.act_add)
 
         self.act_delete = QAction("Delete", self)
         self.act_delete.setShortcut(QKeySequence("Delete"))
         self.act_delete.setShortcutContext(Qt.ApplicationShortcut)
-        self.act_delete.triggered.connect(self._on_delete)
+        self.act_delete.triggered.connect(self._on_delete_active)
         self.addAction(self.act_delete)
 
-        # --- Debounced search
-        self._search_timer = QTimer(self)
-        self._search_timer.setSingleShot(True)
-        self._search_timer.setInterval(150)
-        self._search_timer.timeout.connect(self._refresh_list)
-
-        # --- Menu bar: always-on-top mode
+        # --- Menu bar + toolbar button: always-on-top mode
         mbar = self.menuBar()
         m_view = mbar.addMenu("&Вигляд")
         self.act_topmost = QAction("📌 Завжди поверх інших вікон", self,
@@ -109,10 +78,33 @@ class MainWindow(QMainWindow):
             "Налаштування запам'ятовується.")
         self.act_topmost.toggled.connect(self._on_topmost_toggled)
         m_view.addAction(self.act_topmost)
-        if self._settings.value("ui/always_on_top", False, type=bool):
-            self.act_topmost.setChecked(True)  # applies the flag before show
 
-        self._refresh_list()
+        # Dedicated toolbar button — shares state with the menu action.
+        self.toolbar_top = self.addToolBar("Поверх вікон")
+        self.toolbar_top.setMovable(False)
+        self.toolbar_top.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        self.act_pin = QAction("📌", self, checkable=True)
+        self.act_pin.setToolTip(
+            "Тримати вікно над усіма іншими програмами (Ctrl+T). "
+            "Налаштування запам'ятовується.")
+        self.act_pin.toggled.connect(self._on_topmost_toggled)
+        self.toolbar_top.addAction(self.act_pin)
+
+        if self._settings.value("ui/always_on_top", False, type=bool):
+            self.act_topmost.setChecked(True)  # syncs the toolbar button too
+
+    # ----- active-page routing for shortcuts -----
+    def _current_page(self) -> VocabularyPage:
+        return self.tabs.currentWidget()
+
+    def _on_focus_search_active(self) -> None:
+        self._current_page()._on_focus_search()
+
+    def _on_add_active(self) -> None:
+        self._current_page()._on_add()
+
+    def _on_delete_active(self) -> None:
+        self._current_page()._on_delete()
 
     # ----- always on top -----
     def is_always_on_top(self) -> bool:
@@ -120,112 +112,39 @@ class MainWindow(QMainWindow):
 
     def _on_topmost_toggled(self, on: bool) -> None:
         on = bool(on)
+        # Keep the menu item and the toolbar button in step (one source of
+        # truth); block signals so the second action doesn't re-enter here.
+        for act in (self.act_topmost, self.act_pin):
+            if act.isChecked() != on:
+                act.blockSignals(True)
+                act.setChecked(on)
+                act.blockSignals(False)
+        # Changing WindowStaysOnTopHint tears down the native window and
+        # hides it (Qt flips isVisible() to False), so capture visibility
+        # *before* the change and re-show explicitly. Without the explicit
+        # hide/show the window stays invisible on Windows.
+        was_visible = self.isVisible()
         geo = self.geometry()
+        self.hide()
         self.setWindowFlag(Qt.WindowStaysOnTopHint, on)
-        if self.isVisible():
+        if was_visible:
             self.show()
             self.setGeometry(geo)
         self._settings.setValue("ui/always_on_top", on)
-        if hasattr(self, "status"):
-            self.status.showMessage(
-                "📌 Поверх інших вікон: увімкнено" if on
-                else "📌 Поверх інших вікон: вимкнено"
-            )
-
-    # ----- search / focus -----
-    def _on_focus_search(self) -> None:
-        self.search.setFocus()
-        self.search.selectAll()
-
-    def _on_search_changed(self, _text: str) -> None:
-        self._search_timer.start()
-
-    # ----- helpers -----
-    def _format_word(self, w: Word) -> str:
-        parts = [f"🇨🇿 {w.cs}"]
-        if w.pos:
-            parts.append(f"[{w.pos}]")
-        if w.uk:
-            parts.append(f"🇺🇦 {w.uk}")
-        if w.ru:
-            parts.append(f"🇷🇺 {w.ru}")
-        if w.note:
-            parts.append(f"— {w.note}")
-        return "    ".join(parts)
-
-    def _refresh_list(self) -> None:
-        self.list_widget.clear()
-        q = self.search.text().strip()
-        words = search_words(self.db_path, q) if q else list_words(self.db_path)
-        for w in words:
-            item = QListWidgetItem(self._format_word(w))
-            item.setData(Qt.UserRole, w.id)
-            self.list_widget.addItem(item)
-        self.status.showMessage(f"Знайдено: {self.list_widget.count()}")
-
-    def _selected_id(self) -> Optional[int]:
-        item = self.list_widget.currentItem()
-        return int(item.data(Qt.UserRole)) if item else None
-
-    # ----- handlers -----
-    def _on_add(self) -> None:
-        from .word_dialog import WordDialog
-        dlg = WordDialog(self, self.db_path, word_id=None)
-        if dlg.exec():
-            self._refresh_list()
-
-    def _on_edit(self) -> None:
-        wid = self._selected_id()
-        if wid is None:
-            QMessageBox.information(self, "—", "Виберіть слово для редагування.")
-            return
-        from .word_dialog import WordDialog
-        dlg = WordDialog(self, self.db_path, word_id=wid)
-        if dlg.exec():
-            self._refresh_list()
-
-    def _on_delete(self) -> None:
-        wid = self._selected_id()
-        if wid is None:
-            return
-        ans = QMessageBox.question(self, "Видалити?", "Точно видалити це слово?")
-        if ans == QMessageBox.Yes:
-            delete_word(self.db_path, wid)
-            self._refresh_list()
-
-    def _on_check_selected(self) -> None:
-        from ..czech import analyze_cs
-        from ..spellcheck import SpellChecker
-        wid = self._selected_id()
-        if wid is None:
-            QMessageBox.information(self, "—", "Виберіть слово для перевірки.")
-            return
-        w = get_word(self.db_path, wid)
-        if not w:
-            return
-        issues = analyze_cs(w.cs, SpellChecker())
-        if not issues:
-            QMessageBox.information(self, "✅ OK", f"«{w.cs}» — правильно.")
-            return
-        from .check_report import CheckReportDialog
-        dlg = CheckReportDialog(self, issues,
-                                getter=lambda: w.cs,
-                                setter=None, recheck=None)
-        dlg.exec()
-
-    def _on_export(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Експорт CSV", "slovnik.csv", "CSV (*.csv)"
+        self.status.showMessage(
+            "📌 Поверх інших вікон: увімкнено" if on
+            else "📌 Поверх інших вікон: вимкнено"
         )
-        if path:
-            n = export_csv(self.db_path, path)
-            self.status.showMessage(f"Експортовано {n} слів")
 
-    def _on_import(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Імпорт CSV", "", "CSV (*.csv)"
-        )
-        if path:
-            n = import_csv(self.db_path, path)
-            self.status.showMessage(f"Імпортовано {n} слів")
-            self._refresh_list()
+    # ----- backward-compatible surface (delegates to the Czech page) -----
+    def __getattr__(self, name: str):
+        # Pre-tabs callers referenced ``win.list_widget``, ``win.search``,
+        # ``win._on_delete()`` … — route those to the Czech page.
+        try:
+            page = object.__getattribute__(self, "page_cs")
+        except AttributeError:
+            page = None
+        if page is not None and hasattr(page, name):
+            return getattr(page, name)
+        raise AttributeError(
+            f"{type(self).__name__!r} object has no attribute {name!r}")

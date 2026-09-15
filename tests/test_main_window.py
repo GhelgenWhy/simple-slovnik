@@ -30,7 +30,8 @@ def seeded_db(tmp_path):
 
 def test_main_window_starts_empty_when_no_db(qtbot, tmp_path):
     db_path = str(tmp_path / "empty.db")
-    win = MainWindow(db_path)
+    # Isolated settings so a machine-wide "always on top" flag can't leak in.
+    win = MainWindow(db_path, settings=_test_settings(tmp_path))
     qtbot.addWidget(win)
     win.show()
     qtbot.waitExposed(win)
@@ -187,6 +188,32 @@ def test_always_on_top_restored_from_settings(qtbot, seeded_db, tmp_path):
     win = MainWindow(seeded_db, settings=s)
     qtbot.addWidget(win)
     assert win.is_always_on_top()
+    assert win.act_pin.isChecked()  # toolbar button follows the restore
+
+
+def test_topmost_toolbar_button_toggles_and_syncs(qtbot, seeded_db, tmp_path):
+    s = _test_settings(tmp_path)
+    win = MainWindow(seeded_db, settings=s)
+    qtbot.addWidget(win)
+    win.show()
+    # A dedicated, always-visible toolbar button exists as a checkable action.
+    assert win.act_pin in list(win.toolbar_top.actions())
+    assert win.act_pin.isCheckable()
+    assert not win.toolbar_top.isMovable()
+
+    # Toggling the button turns the flag on and mirrors into the menu action.
+    win.act_pin.setChecked(True)
+    assert win.is_always_on_top()
+    assert win.act_topmost.isChecked()
+    assert bool(win.windowFlags() & Qt.WindowStaysOnTopHint)
+    assert win.isVisible()  # the window must not vanish when the flag flips
+
+    # Toggling the menu action mirrors back into the toolbar button.
+    win.act_topmost.setChecked(False)
+    assert not win.act_pin.isChecked()
+    assert not bool(win.windowFlags() & Qt.WindowStaysOnTopHint)
+    assert win.isVisible()  # still visible after switching it back off
+    assert s.value("ui/always_on_top", False, type=bool) is False
 
 
 # ----- Slice 7: check button uses the Czech analyzer -----
@@ -273,3 +300,93 @@ def test_run_function_creates_app_and_window(monkeypatch):
     assert show_called["v"] is True
     assert exec_called["v"] is True
     assert rc == 0
+
+# ----- Sync buttons (Pull / Push) -----
+
+def _win_with_sync(qtbot, tmp_path, seeded_db, server_url):
+    from PySide6.QtCore import QSettings
+    settings = QSettings(str(tmp_path / "sync.ini"), QSettings.IniFormat)
+    settings.setValue("sync/server_url", server_url)
+    settings.setValue("sync/token", "test-token-123")
+    win = MainWindow(seeded_db, settings=settings)
+    qtbot.addWidget(win)
+    # Synthetic Qt clicks only reach widgets on a visible window since the
+    # buttons live inside a tab page (they did not before the tabs refactor).
+    win.show()
+    qtbot.waitExposed(win)
+    return win
+
+
+def test_sync_buttons_exist(seeded_db, qtbot, server_url, tmp_path):
+    win = _win_with_sync(qtbot, tmp_path, seeded_db, server_url)
+    assert win.btn_pull.text() == "⬇ Pull"
+    assert win.btn_push.text() == "⬆ Push"
+    assert win.btn_pull.isEnabled() and win.btn_push.isEnabled()
+
+
+def test_sync_settings_dialog_persists(seeded_db, qtbot, tmp_path):
+    from PySide6.QtCore import QSettings
+    from slovnik.ui.sync_dialog import SyncSettingsDialog
+    settings = QSettings(str(tmp_path / "s.ini"), QSettings.IniFormat)
+    win = MainWindow(seeded_db, settings=settings)
+    qtbot.addWidget(win)
+    dlg = SyncSettingsDialog(win, settings)
+    dlg.ed_url.setText("https://example.ts.net:8443/")
+    dlg.ed_token.setText("tok-123")
+    dlg.accept()
+    assert settings.value("sync/server_url", "", type=str) \
+        == "https://example.ts.net:8443"
+    assert settings.value("sync/token", "", type=str) == "tok-123"
+
+
+def test_push_button_sends_word_to_server(seeded_db, qtbot, tmp_path,
+                                          server_url):
+    from slovnik.db import init_db
+    from slovnik.sync import SyncClient
+    win = _win_with_sync(qtbot, tmp_path, seeded_db, server_url)
+    qtbot.mouseClick(win.btn_push, Qt.LeftButton)
+    qtbot.waitUntil(lambda: win.btn_push.isEnabled()
+                    and "Push" in win.status.currentMessage(),
+                    timeout=15000)
+    # a second client sees the words through the server
+    other = str(tmp_path / "other.db")
+    init_db(other)
+    client = SyncClient(other, server_url, "test-token-123",
+                        device_id="other")
+    assert client.pull().pulled_applied == 3
+
+
+def test_pull_button_fetches_remote_word(seeded_db, qtbot, tmp_path,
+                                         server_url):
+    from slovnik.db import init_db
+    from slovnik.sync import SyncClient
+    win = _win_with_sync(qtbot, tmp_path, seeded_db, server_url)
+    seed = str(tmp_path / "seed.db")
+    init_db(seed)
+    from slovnik.db import add_word
+    add_word(seed, cs="abraxas", uk="абракадабра")
+    assert SyncClient(seed, server_url, "test-token-123",
+                      device_id="seed").push().ok
+
+    qtbot.mouseClick(win.btn_pull, Qt.LeftButton)
+    qtbot.waitUntil(lambda: win.btn_pull.isEnabled()
+                    and win.list_widget.count() == 4, timeout=15000)
+    texts = " ".join(win.list_widget.item(i).text()
+                     for i in range(win.list_widget.count()))
+    assert "abraxas" in texts
+    assert "Pull" in win.status.currentMessage()
+
+
+def test_push_error_reported_in_status(seeded_db, qtbot, tmp_path):
+    from PySide6.QtCore import QSettings
+    settings = QSettings(str(tmp_path / "bad.ini"), QSettings.IniFormat)
+    settings.setValue("sync/server_url", "http://127.0.0.1:1")
+    settings.setValue("sync/token", "test-token-123")
+    win = MainWindow(seeded_db, settings=settings)
+    qtbot.addWidget(win)
+    win.show()
+    qtbot.waitExposed(win)
+    qtbot.mouseClick(win.btn_push, Qt.LeftButton)
+    qtbot.waitUntil(lambda: win.btn_push.isEnabled()
+                    and win.status.currentMessage().startswith("❌"),
+                    timeout=20000)

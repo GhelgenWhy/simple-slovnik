@@ -14,3 +14,7 @@ htmlcov/
 *.log
 .idea/
 .vscode/
+server.db
+server.db-journal
+server.db-wal
+server.db-shm

@@ -1,4 +1,4 @@
-"""Add/Edit vocabulary entry dialog."""
+"""Add/Edit vocabulary entry dialog (language-aware)."""
 from __future__ import annotations
 
 from typing import Optional
@@ -16,30 +16,29 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..czech import analyze_cs
+from ..analyzers import analyzer, hard_kinds, spellchecker
 from ..db import add_word, get_word, update_word
-from ..spellcheck import SpellChecker
+from ..lang import get_language
 
 POS_OPTIONS = ["", "noun", "verb", "adj", "adv", "pron", "prep",
                "conj", "interj", "phrase", "num"]
 
-# Issue kinds worth a confirmation before saving (definite mistakes).
-_HARD_KINDS = ("reflexive", "preposition", "alphabet")
-
 
 class WordDialog(QDialog):
     def __init__(self, parent: Optional[QWidget], db_path: str,
-                 word_id: Optional[int] = None):
+                 word_id: Optional[int] = None, lang: str = "cs"):
         super().__init__(parent)
         self.db_path = db_path
         self.word_id = word_id
-        self._checker: Optional[SpellChecker] = None
+        self.lang = get_language(lang)
+        self.language = self.lang.code
+        self._checker: Optional[object] = None
         self.setWindowTitle(
             "Редагувати слово" if word_id else "Додати слово"
         )
         self.resize(440, 300)
 
-        # --- Form fields
+        # --- Form fields (headword field is `self.cs` for every language)
         self.cs = QLineEdit()
         self.uk = QLineEdit()
         self.ru = QLineEdit()
@@ -49,14 +48,15 @@ class WordDialog(QDialog):
         self.note = QLineEdit()
 
         form = QFormLayout()
-        form.addRow("🇨🇿 Česky *:", self.cs)
+        form.addRow(f"{self.lang.emoji} {self.lang.headword_display} *:",
+                    self.cs)
         form.addRow("🇺🇦 Українська:", self.uk)
         form.addRow("🇷🇺 Русский:", self.ru)
         form.addRow("POS:", self.pos)
         form.addRow("Нотатка:", self.note)
 
-        # --- Spellcheck button
-        self.check_btn = QPushButton("🔍 Перевірити cs")
+        # --- Check button (runs this language's analyzer)
+        self.check_btn = QPushButton(f"🔍 Перевірити {self.lang.title.lower()}")
         self.check_btn.clicked.connect(self._on_check_cs)
         check_row = QHBoxLayout()
         check_row.addWidget(self.check_btn)
@@ -77,7 +77,7 @@ class WordDialog(QDialog):
 
         # --- Prefill if editing
         if word_id is not None:
-            w = get_word(db_path, word_id)
+            w = get_word(db_path, word_id, lang=self.language)
             if w:
                 self.cs.setText(w.cs)
                 self.uk.setText(w.uk)
@@ -90,14 +90,14 @@ class WordDialog(QDialog):
                         self.pos.setEditText(w.pos)
                 self.note.setText(w.note)
 
-    # ----- spellcheck -----
-    def _get_checker(self) -> SpellChecker:
+    # ----- check -----
+    def _get_checker(self):
         if self._checker is None:
-            self._checker = SpellChecker()
+            self._checker = spellchecker(self.language)
         return self._checker
 
     def _analyze(self, text: str):
-        return analyze_cs(text, self._get_checker())
+        return analyzer(self.language)(text, self._get_checker())
 
     def _on_check_cs(self) -> None:
         word = self.cs.text().strip()
@@ -121,14 +121,15 @@ class WordDialog(QDialog):
     def _on_save(self) -> None:
         cs = self.cs.text().strip()
         if not cs:
-            QMessageBox.warning(self, "—", "Поле «cs» обов'язкове.")
+            QMessageBox.warning(self, "—",
+                                f"Поле «{self.lang.title}» обов'язкове.")
             return
-        hard = [i for i in self._analyze(cs) if i.kind in _HARD_KINDS]
+        hard = [i for i in self._analyze(cs) if i.kind in hard_kinds(self.language)]
         if hard:
             lines = "\n".join(f"• {i.message}" for i in hard)
             ans = QMessageBox.question(
                 self, "Можливі помилки",
-                f"Знайдено можливі помилки в чеському записі:\n\n{lines}"
+                f"Знайдено можливі помилки:\n\n{lines}"
                 f"\n\nЗберегти все одно?",
             )
             if ans != QMessageBox.Yes:
@@ -139,11 +140,12 @@ class WordDialog(QDialog):
         note = self.note.text().strip()
         try:
             if self.word_id is not None:
-                update_word(self.db_path, self.word_id,
+                update_word(self.db_path, self.word_id, lang=self.language,
                             cs=cs, uk=uk, ru=ru, pos=pos, note=note)
             else:
                 self.word_id = add_word(
-                    self.db_path, cs=cs, uk=uk, ru=ru, pos=pos, note=note
+                    self.db_path, cs=cs, uk=uk, ru=ru, pos=pos, note=note,
+                    lang=self.language,
                 )
         except Exception as e:
             QMessageBox.critical(self, "Помилка",

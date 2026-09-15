@@ -1,12 +1,14 @@
-"""Read-only audit of the whole vocabulary database.
+"""Read-only audit of a vocabulary database (per-language).
 
-Checks every entry for spelling, se/si particles, preposition forms,
-field mix-ups (Cyrillic in cs, Czech diacritics in uk/ru), whitespace
-glitches and duplicates — and REPORTS everything without changing a
-single row (no auto-correction by design).
+Checks every entry of one language (``cs`` or ``en``) for spelling,
+language rules (Czech se/si + prepositions, or English rules), field
+mix-ups (Cyrillic in the headword), whitespace glitches and duplicates —
+and REPORTS everything without changing a single row (no auto-correction
+by design).
 
 Usage:
-    python -m slovnik.db_check [db_path] [--json out.json] [--no-spell] [--strict]
+    python -m slovnik.db_check [db_path] [--lang cs|en]
+                                [--json out.json] [--no-spell] [--strict]
 
 Exit codes: 0 = clean run, 1 = issues found (only with --strict),
 2 = could not open the DB.
@@ -20,20 +22,25 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .czech import KIND_LABELS, analyze_cs
+from .analyzers import analyzer
+from .czech import KIND_LABELS
 from .db import iter_words
+from .lang import get_language
 from .spellcheck import SpellChecker
+
+from .english import en_spellchecker
 
 DEFAULT_DB = Path(__file__).resolve().parent.parent.parent / "data" / "slovnik.db"
 
 _CYRILLIC_RE = re.compile(r"[\u0400-\u04FF]")
 _CZECH_DIACRITICS_RE = re.compile(r"[řěůŘĚŮ]")
-_TEXT_FIELDS = ("cs", "uk", "ru", "pos", "note")
+_TEXT_FIELDS = ("cs", "uk", "ru", "pos", "note")  # Word attribute names
 _SEVERITY_ORDER = {"error": 0, "warn": 1, "info": 2}
 
 
-def check_db(db_path: str, checker: SpellChecker | None = None) -> dict:
-    """Audit every word; return a JSON-serializable report dict.
+def check_db(db_path: str, checker: SpellChecker | None = None,
+             lang: str = "cs") -> dict:
+    """Audit every word of ``lang``; return a JSON-serializable report dict.
 
     Opens the DB read-only in spirit: only SELECTs are issued and the
     file is never created or modified (a missing file raises instead).
@@ -42,7 +49,8 @@ def check_db(db_path: str, checker: SpellChecker | None = None) -> dict:
     if not path.exists():
         raise FileNotFoundError(f"База даних не знайдена: {path}")
 
-    words = list(iter_words(db_path))
+    head = get_language(lang).csv_headword  # "cs" | "en" — user-facing name
+    words = list(iter_words(db_path, lang=lang))
 
     # Duplicate detection (case-insensitive; the UNIQUE index normally
     # prevents these, but CSV imports may have bypassed it historically).
@@ -51,6 +59,7 @@ def check_db(db_path: str, checker: SpellChecker | None = None) -> dict:
         seen.setdefault(w.cs.strip().lower(), []).append(w.id)
     dup_ids = {wid for ids in seen.values() if len(ids) > 1 for wid in ids}
 
+    analyze = analyzer(lang)  # Czech or English headword rules
     report_words: list[dict] = []
     counts = {"error": 0, "warn": 0, "info": 0}
     for w in words:
@@ -62,14 +71,14 @@ def check_db(db_path: str, checker: SpellChecker | None = None) -> dict:
             counts[severity] += 1
 
         if not w.cs.strip():
-            add("cs", "error", "Порожнє поле «cs».")
+            add("cs", "error", f"Порожнє поле «{head}».")
         else:
             if _CYRILLIC_RE.search(w.cs):
                 add("alphabet", "error",
-                    "Кирилиця в полі «cs» — схоже, переклад записано "
+                    f"Кирилиця в полі «{head}» — схоже, переклад записано "
                     "не в тому полі.")
             if w.cs != w.cs.strip() or "  " in w.cs:
-                add("whitespace", "warn", "Зайві пробіли в полі «cs».")
+                add("whitespace", "warn", f"Зайві пробіли в полі «{head}».")
         for field in ("uk", "ru"):
             val = getattr(w, field)
             if val and _CZECH_DIACRITICS_RE.search(val):
@@ -87,7 +96,7 @@ def check_db(db_path: str, checker: SpellChecker | None = None) -> dict:
             add("translation", "info", "Немає перекладу (uk і ru порожні).")
 
         if w.cs.strip():
-            for issue in analyze_cs(w.cs, checker):
+            for issue in analyze(w.cs, checker):
                 add(issue.kind, issue.severity, issue.message)
 
         if issues:
@@ -101,6 +110,7 @@ def check_db(db_path: str, checker: SpellChecker | None = None) -> dict:
     report_words.sort(key=lambda e: e["id"])
     return {
         "db": str(path),
+        "lang": lang,
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "words_checked": len(words),
         "counts": {**counts, "words_with_issues": len(report_words)},
@@ -110,7 +120,8 @@ def check_db(db_path: str, checker: SpellChecker | None = None) -> dict:
 
 def print_report(report: dict) -> None:
     counts = report["counts"]
-    print(f"База: {report['db']}")
+    lang_note = {"cs": "", "en": " (англійський)"}.get(report.get("lang"), "")
+    print(f"База: {report['db']}{lang_note}")
     print(f"Перевірено слів: {report['words_checked']}")
     if not report["words"]:
         print("✅ Проблем не знайдено.")
@@ -136,6 +147,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("db", nargs="?", default=str(DEFAULT_DB),
                         help="шлях до SQLite-бази (типово data/slovnik.db)")
+    parser.add_argument("--lang", default="cs", choices=["cs", "en"],
+                        help="мова словаря: cs (типово) або en")
     parser.add_argument("--json", metavar="PATH",
                         help="додатково зберегти звіт у JSON")
     parser.add_argument("--no-spell", action="store_true",
@@ -148,13 +161,14 @@ def main(argv: list[str] | None = None) -> int:
     checker = None
     if not args.no_spell:
         try:
-            checker = SpellChecker()
+            checker = (en_spellchecker() if args.lang == "en"
+                       else SpellChecker())
         except Exception as exc:  # dict missing/corrupt — keep auditing
             print(f"⚠ Словник недоступний ({exc}); орфографію пропущено.",
                   file=sys.stderr)
 
     try:
-        report = check_db(args.db, checker)
+        report = check_db(args.db, checker, lang=args.lang)
     except FileNotFoundError as exc:
         print(f"Помилка: {exc}", file=sys.stderr)
         return 2

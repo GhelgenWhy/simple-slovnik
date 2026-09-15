@@ -1,21 +1,29 @@
-# Slovník — Czech ↔ Ukrainian/Russian dictionary
+# Slovník — Czech ↔ Ukrainian/Russian + English dictionary
 
 A small, **offline desktop vocabulary app** built for personal use.
 Stores entries in a local SQLite database, supports fast substring search,
-and can check Czech spelling (with diacritics) using the LibreOffice
-Czech hunspell dictionary.
+and can check Czech spelling (with diacritics) and English spelling using
+the bundled LibreOffice/SCOWL hunspell dictionaries.
+
+Two fully independent dictionaries live side by side as tabs
+(**🇨🇿 Чеський** and **🇬🇧 English**): separate tables, separate words —
+what you save on one page never mixes with the other.
 
 | Feature                | Status             |
 |------------------------|--------------------|
 | CRUD (cs / uk / ru / pos / note) | ✅ Done |
-| Substring search       | ✅ Done             |
-| CSV import / export    | ✅ Done             |
+| **English dictionary tab (en ↔ uk/ru, separate DB table)** | ✅ Done |
+| English spellcheck (en_US) | ✅ Done |
+| Substring search (per language) | ✅ Done |
+| CSV import / export (per language) | ✅ Done |
 | Czech spellcheck + suggestions | ✅ Done (pure-Python fallback) |
 | se/si + preposition checks with fixes | ✅ Done |
-| Always-on-top mode (Ctrl+T) | ✅ Done |
-| Read-only DB audit (`slovnik-dbcheck`) | ✅ Done |
+| Always-on-top pin button (📌 / Ctrl+T) | ✅ Done |
+| Read-only DB audit (`slovnik-dbcheck --lang`) | ✅ Done |
+| Sync server (FastAPI broker, tailnet-only) | ✅ Done (+ deployed) |
+| Desktop sync UI: ⬇ Pull / ⬆ Push buttons | ✅ Done |
+| Mobile APK (Flet) — built, [on-device check pending](mobile/README.md) | 🟡 APK ready |
 | Desktop GUI (PySide6)  | ✅ Done             |
-| Mobile APK + sync via own server | 📋 [Planned](docs/MOBILE_PLAN.md) |
 
 ---
 
@@ -68,6 +76,33 @@ python -m slovnik /path/to/my-vocabulary.db
 
 ---
 
+## English dictionary (separate tab)
+
+The window has two tabs: **🇨🇿 Чеський** (Czech ↔ uk/ru) and
+**🇬🇧 English** (English ↔ uk/ru). They are **two independent dictionaries
+in one file**:
+
+- Czech words live in the `words` table (headword `cs`), English words in
+  `words_en` (headword `en`). Nothing is shared — no word collisions, no
+  cross-search, no shared translations or notes. Deleting an English word
+  never touches a Czech one and vice versa.
+- Every page has the same UI: search (headword / uk / ru), add / edit /
+  delete, **✅ Перевірити** (English checks), CSV import/export.
+- The English checker runs Cyrillic-in-`en` detection plus English spelling
+  against the bundled `en_US` hunspell dictionary
+  (`dicts/en_US/`, SCOWL-derived). Czech se/si and preposition rules are
+  never applied to English.
+- CSV files use an `en` header for English
+  (`en,uk,ru,pos,note`) and `cs` for Czech.
+
+The DB audit supports both languages too:
+
+```bash
+python -m slovnik.db_check --lang en my.db
+```
+
+---
+
 ## Spellcheck & Czech checks
 
 When you press **✅ Перевірити** (or the spellcheck button in the add/edit
@@ -110,11 +145,38 @@ It will be auto-detected and used in preference to the pure backend.
 
 ---
 
+## Synchronizace (desktop)
+
+Two buttons in the bottom toolbar drive a **manual, one-shot** sync with
+your own server (no background traffic, no real-time webhooks — simple
+and predictable):
+
+- **⬇ Pull** — fetch everything new from the server. **Conflict → the
+  device version wins**: your unpushed local edits are never overwritten;
+  they stay pending and the next Push sends them.
+- **⬆ Push** — send your unpushed edits to the server. **Conflict → the
+  server version wins**: if the server already holds a newer version of a
+  word, that version replaces your stale local copy (the discarded edit is
+  archived in `sync_conflicts`, so nothing is silently lost).
+- **🔗 Sync…** — server URL + token settings (stored via QSettings).
+
+The buttons run in a background thread; results appear in the status bar
+and the list refreshes automatically.
+
+**Deployed server:** `https://ghelgenserver.taile8591e.ts.net:8443`
+(tailnet-only TLS via `tailscale serve`, systemd unit `slovnik-sync`,
+token in `/opt/slovnik-sync/.env` on the server) — see
+[server/README.md](server/README.md).
+
+---
+
 ## Always on top
 
-**Вигляд → 📌 Завжди поверх інших вікон** (or **Ctrl+T**) keeps the
-window above all other applications — handy while reading Czech text.
-The setting is remembered across restarts (QSettings).
+Press the **📌** button in the toolbar, or use
+**Вигляд → 📌 Завжди поверх інших вікон** (or **Ctrl+T**): the window
+stays above all other applications — handy while reading Czech text.
+The button and the menu item stay in sync, and the setting is remembered
+across restarts (QSettings).
 
 ---
 
@@ -139,28 +201,69 @@ After installing the package the same tool is available as
 ## Data format
 
 The vocabulary lives in a single SQLite file at `data/slovnik.db` (created
-on first run). Schema:
+on first run). Each language has its own table — fully isolated. Schema:
 
 ```sql
 CREATE TABLE words (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    cs         TEXT NOT NULL,         -- Czech headword (case-insensitive unique)
+    cs         TEXT NOT NULL,         -- Czech headword
     uk         TEXT DEFAULT '',       -- Ukrainian translation
     ru         TEXT DEFAULT '',       -- Russian translation
     pos        TEXT DEFAULT '',       -- part of speech (noun / verb / adj / …)
     note       TEXT DEFAULT '',       -- free-form note
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-    UNIQUE(cs COLLATE NOCASE)
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f','now')),
+    deleted    INTEGER NOT NULL DEFAULT 0,  -- tombstone for sync
+    device_id  TEXT NOT NULL DEFAULT '',    -- last writer (sync diagnostics)
+    dirty      INTEGER NOT NULL DEFAULT 0   -- pending push to sync server
+);
+-- One LIVE row per headword; tombstones are exempt so a deleted word
+-- can be re-added later:
+CREATE UNIQUE INDEX idx_words_cs_live ON words(cs COLLATE NOCASE)
+    WHERE deleted = 0;
+
+CREATE TABLE words_en (          -- English dictionary (independent table)
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    en         TEXT NOT NULL,    -- English headword (mirrors the cs table)
+    uk / ru / pos / note / created_at / updated_at / deleted / device_id / dirty
+               (same columns and semantics as above)
+);
+CREATE UNIQUE INDEX idx_words_en_live ON words_en(en COLLATE NOCASE)
+    WHERE deleted = 0;
+
+CREATE TABLE sync_state (      -- sync cursors: last_sync_at, device_id
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+CREATE TABLE sync_conflicts (  -- locally lost versions (conflict UI pending)
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    row_json    TEXT NOT NULL,
+    reason      TEXT NOT NULL DEFAULT 'push_conflict',
+    conflict_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f','now'))
 );
 ```
 
+Older databases are migrated automatically on `init_db` (columns added,
+legacy table-level `UNIQUE(cs)` rebuilt into the partial index — data is
+preserved; the `words_en` table is added). Deletions are **tombstones**
+(`deleted = 1`): invisible in the app, but syncable to other devices.
+
 ### CSV format (import / export)
+
+Czech (`cs` header):
 
 ```csv
 cs,uk,ru,pos,note
 kočka,кіт,кошка,noun,feline
 pes,собака,собака,noun,
+```
+
+English (`en` header):
+
+```csv
+en,uk,ru,pos,note
+apple,яблуко,яблоко,noun,fruit
+dog,собака,собака,noun,
 ```
 
 UTF-8 encoded, no BOM. Header row required. Excel users may want to
@@ -176,8 +279,11 @@ re-export with `utf-8-sig` if Czech/Ukrainian diacritics look broken.
 python -m pytest tests/ -v
 ```
 
-(187 tests covering models, db CRUD, search, CSV, spellcheck,
-Czech se/si & prepositions, main window, dialogs, and the DB audit.)
+(290 tests covering models, db CRUD, search, CSV, spellcheck,
+Czech se/si & prepositions, the English dictionary (en table, en_US
+checker, UI tab), main window + tabs, dialogs, the DB audit, the sync
+schema/LWW merge, the sync client against a live local server, and the
+sync server API.)
 
 ### Adding a column
 
@@ -197,25 +303,37 @@ Czech se/si & prepositions, main window, dialogs, and the DB audit.)
 ```
 simple_slovnik/
 ├── pyproject.toml          # packaging
-├── docs/MOBILE_PLAN.md     # mobile APK + sync plan (not implemented)
+├── docs/MOBILE_PLAN.md     # mobile APK + sync plan
+├── docs/ENGLISH_DICTIONARY_PLAN.md  # English-dictionary plan
 ├── data/slovnik.db         # SQLite DB (created at runtime, gitignored)
 ├── dicts/cs_CZ/            # Czech hunspell dictionary
-│   ├── cs_CZ.aff
-│   └── cs_CZ.dic
+├── dicts/en_US/            # English (en_US, SCOWL) hunspell dictionary
+├── server/                 # sync server (FastAPI broker, tailnet-only)
+│   ├── app.py              #   POST /sync/push · GET /sync/pull · GET /health
+│   ├── Dockerfile          #   python:3.12-slim image
+│   ├── docker-compose.yml  #   volume for server.db + SLOVNIK_TOKEN
+│   └── README.md           #   deployment guide (Tailscale)
 ├── src/slovnik/
 │   ├── __main__.py         # python -m slovnik entry
 │   ├── app.py              # QApplication bootstrap
-│   ├── db.py               # SQLite CRUD + search
+│   ├── db.py               # SQLite CRUD + search + sync schema/LWW merge
 │   ├── models.py           # Word dataclass
-│   ├── spellcheck.py       # Czech spellcheck (auto backend)
-│   ├── czech.py            # se/si particles + preposition rules
+│   ├── lang.py             # per-language config: table / headword / labels
+│   ├── issues.py           # shared Issue + KIND_LABELS (language-agnostic)
+│   ├── spellcheck.py       # spellchecker (auto backend, any dict dir)
+│   ├── czech.py            # se/si particles + preposition rules (cs)
+│   ├── english.py          # English analyzer (analyze_en)
+│   ├── analyzers.py        # per-language analyzer/checker wiring
+│   ├── sync.py             # SyncClient (pure Python, stdlib-only HTTP)
 │   ├── db_check.py         # read-only whole-DB audit (python -m slovnik.db_check)
-│   ├── import_export.py    # CSV import/export
+│   ├── import_export.py    # CSV import/export (per language)
 │   └── ui/
-│       ├── main_window.py  # main window (+ always-on-top mode)
-│       ├── word_dialog.py  # add/edit dialog
-│       └── check_report.py # check-findings report dialog
-└── tests/                  # pytest suite
+│       ├── main_window.py  # shell: tabs + always-on-top + shortcuts
+│       ├── vocabulary_page.py  # one language: search/list/CRUD/CSV/sync
+│       ├── word_dialog.py  # add/edit dialog (language-aware)
+│       ├── check_report.py # check-findings report dialog
+│       └── sync_dialog.py  # sync server settings
+└── tests/                  # pytest suite (290 tests)
 ```
 
 ---
@@ -241,6 +359,12 @@ later requires only rewriting `ui/`.
 
 ## FAQ
 
+**Q: Do the Czech and English dictionaries interact?**
+A: No. They are two fully separate tables (`words` / `words_en`) in the
+same file. Search, edit, delete, CSV and checks on one tab never touch
+the other. Even the same spelling in both languages is a separate entry
+(you may add `cat` to English and `kotě` to Czech independently).
+
 **Q: My Czech word shows as "incorrect" even though it IS a word.**
 A: The bundled `cs_CZ.dic` has ~190 k headwords. Compound forms and very
 rare words may be missing. Press the Check button to see suggestions; you
@@ -255,19 +379,28 @@ A: `data/slovnik.db`. Back up this file. You can also export to CSV from
 the **📤 Експорт CSV** button.
 
 **Q: Does this phone home?**
-A: No. Zero network calls. The only outbound traffic is optional git
-operations you trigger.
+A: No. The app makes zero network calls on its own. Sync exists as an
+opt-in feature (`slovnik.sync` + your own server inside your Tailscale);
+it is not wired into the UI yet and never talks to any third-party service.
 
 **Q: Can multiple people share a dictionary?**
-A: Not yet. The DB is a local SQLite file. Sharing means merging — which
-is conflict-prone (see roadmap for server-backed option).
+A: Not through the UI yet. The sync server (`server/`) already implements
+multi-device merge (last-write-wins per word, tombstones, conflicts kept
+for 30 days) — the missing piece is the settings/menu wiring (Phase 4).
 
 ---
 
 ## Roadmap
 
-- [ ] Mobile APK + sync via own server in Tailscale — see
-      [docs/MOBILE_PLAN.md](docs/MOBILE_PLAN.md) (plan ready)
+- [x] **English dictionary tab** — independent `words_en` table, en_US
+      spellcheck, per-language CSV and audit
+- [x] **Sync foundations** — tombstone schema + `slovnik.sync` client +
+      FastAPI sync server (deployed on the tailnet, see `server/README.md`)
+- [x] **Desktop sync UI** — ⬇ Pull / ⬆ Push buttons (pull = device wins,
+      push = server wins)
+- [x] **Mobile APK built** — Flet app in [mobile/](mobile/README.md):
+      list/search, editor with Czech checks, manual pull/push sync
+- [ ] On-device verification (install APK on the phone, spike dict/sync)
 - [ ] Add a JSON-based "Anki deck" export
 - [ ] Tag system (categories: grammar, slang, formal, …)
 - [ ] Czech declension helper (shows all 7 cases for a noun)
@@ -284,4 +417,6 @@ MIT — see header of individual files for details.
 ## Credits
 
 - Czech dictionary: [LibreOffice dictionaries](https://github.com/LibreOffice/dictionaries) (MPL 2.0)
+- English dictionary (en_US): derived from [SCOWL](http://wordlist.sourceforge.net/)
+  via LibreOffice dictionaries (permissive license, see `dicts/en_US/README_en_US.txt`)
 - GUI framework: [PySide6](https://doc.qt.io/qtforpython-6/) (LGPL)

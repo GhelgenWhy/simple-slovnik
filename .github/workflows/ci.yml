@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # Core + desktop + server tests. Windows is in the matrix on purpose:
+  # the cp1251 console bug (update_mobile_package.py) only reproduces there.
+  tests:
+    name: tests (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.11", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install Qt runtime libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libgl1 libxkbcommon-x11-0 \
+            libdbus-1-3 libfontconfig1 libxcb-cursor0
+      - name: Install package
+        run: python -m pip install -e ".[dev,mobile-tests]"
+      - name: Run tests (core, desktop, server, mobile)
+        run: python -m pytest -q
+        env:
+          QT_QPA_PLATFORM: offscreen
+
+  # The APK bundles a copy of the Qt-free core; this job guards the copy
+  # and runs the mobile smoke/handler tests independently of the desktop
+  # suite. Note: no skip allowed here — flet must be installed for real.
+  mobile-package:
+    name: mobile package + smoke tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Mobile core copy is current
+        run: python tools/update_mobile_package.py --check
+      - name: Install flet (pinned) and pytest
+        run: |
+          python -m pip install flet==0.86.5 pytest
+          python -m pip install --no-deps -e .
+      - name: Run mobile tests (flet present, no skips)
+        run: python -m pytest mobile/tests tests/test_mobile_package_sync.py -q -rs
+
+  # Reproducible APK build (manual; needs the full Flutter/Android chain).
+  # Produces the APK together with a manifest (commit, sha256, versions,
+  # bundled dict hashes, packaged-core check).
+  apk:
+    name: build APK
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Install flet
+        run: python -m pip install flet==0.86.5 flet-cli==0.86.5
+      - name: Sync mobile core copy
+        run: python tools/update_mobile_package.py
+      - name: Build APK
+        working-directory: mobile
+        run: flet build apk --yes --verbose
+      - name: Verify packaged core + write manifest
+        run: |
+          python tools/check_apk_core.py
+          python tools/apk_manifest.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: slovnik-mobile-apk
+          path: |
+            mobile/build/apk/slovnik-mobile.apk
+            mobile/build/apk/slovnik-mobile.apk.manifest.json
+          if-no-files-found: error

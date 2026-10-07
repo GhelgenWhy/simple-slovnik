@@ -6,6 +6,7 @@ semantics of Phase 2 (push LWW, pull cursor, conflicts, auth).
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 
 import pytest
@@ -90,7 +91,8 @@ def test_push_and_pull_roundtrip(client_a, client_b):
 
 
 def get_sync_state_last(db_path: str) -> str | None:
-    return db.get_sync_state(db_path, "last_sync_at")
+    """The pull cursor of the v2 protocol (per language)."""
+    return db.get_sync_state(db_path, "cs/cursor")
 
 
 def test_second_sync_is_noop(client_a, client_b):
@@ -185,17 +187,20 @@ def test_push_conflict_reports_server_version(client_a, client_b):
     result = sync_a.push()
     assert result.ok and len(result.conflicts) == 1
     assert result.conflicts[0]["uk"] == "novější B"
-    # The losing version is recoverable locally.
+    # Both directions are archived locally now: the server's winning version
+    # (reason push_conflict) and the local version that lost (push_lost_local).
     conn = sqlite3.connect(path_a)
     try:
         rows = conn.execute(
             "SELECT reason, row_json FROM sync_conflicts").fetchall()
     finally:
         conn.close()
-    assert rows and rows[0][0] == "push_conflict"
-    # The SERVER's winning version is stored (the local loser still lives
-    # in the words table), so the future conflict UI can show both.
-    assert "novější B" in rows[0][1]
+    reasons = {r[0] for r in rows}
+    assert {"push_conflict", "push_lost_local"} <= reasons
+    winner = next(json.loads(r[1]) for r in rows if r[0] == "push_conflict")
+    assert winner["uk"] == "novější B"
+    loser = next(json.loads(r[1]) for r in rows if r[0] == "push_lost_local")
+    assert loser["uk"] == "starší A"
 
 
 # ---------------------------------------------------------------------------
@@ -304,11 +309,24 @@ def test_pull_device_wins_keeps_unpushed_edit(client_a, client_b):
     assert result.ok and result.pulled == 1 and result.pulled_applied == 0
     w = get_word(path_a, wid)
     assert w.uk == "moje starší úprava" and w.dirty == 1
+    # The skipped remote version is archived so it is not lost when the
+    # cursor moves past it (the v2 cursor does not re-fetch old rows).
+    conn = sqlite3.connect(path_a)
+    try:
+        rows = conn.execute(
+            "SELECT reason, row_json FROM sync_conflicts").fetchall()
+    finally:
+        conn.close()
+    kept = [json.loads(r[1]) for r in rows if r[0] == "pull_kept_local"]
+    assert kept and kept[0]["uk"] == "novější na serveru"
 
-    # Default (plain LWW) pull would overwrite the dirty loser:
-    result = sync_a.pull()
-    assert result.ok and result.pulled_applied == 1
-    assert get_word(path_a, wid).uk == "novější na serveru"
+    # The server version still wins in the end — via Push (server wins),
+    # which is the button semantics: the local loser is archived and the
+    # server's version applied.
+    result = sync_a.push(accept_server_conflicts=True)
+    assert result.ok and len(result.conflicts) == 1
+    w = get_word(path_a, wid)
+    assert w.uk == "novější na serveru" and w.dirty == 0
 
 
 def test_push_server_wins_overwrites_local_loser(client_a, client_b):
@@ -410,11 +428,14 @@ def test_bootstrap_flag_is_set_only_after_success(tmp_path, server_url):
     init_db(path_a)
     _insert_legacy_row(path_a, "první")
     sync_a = SyncClient(path_a, server_url, TOKEN, device_id="device-aaa")
-    assert db.get_sync_state(path_a, "bootstrap_done") is None
+    assert db.get_sync_state(path_a, "cs/bootstrap_done") is None
 
     r = sync_a.push()
     assert r.ok and r.pushed == 1
-    assert db.get_sync_state(path_a, "bootstrap_done") == "1"
+    # v2 keeps sync state per language (and per server identity); the old
+    # language-less key is read for migration but never written again.
+    assert db.get_sync_state(path_a, "cs/bootstrap_done") == "1"
+    assert db.get_sync_state(path_a, "bootstrap_done") is None
 
     # idempotent: second push has nothing new to send
     r = sync_a.push()

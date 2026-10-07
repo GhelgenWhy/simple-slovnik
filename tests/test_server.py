@@ -18,7 +18,11 @@ def test_health_needs_no_token(store):
     client = TestClient(create_app(store, token="t"))
     resp = client.get("/health")
     assert resp.status_code == 200
-    assert resp.json() == {"status": "ok", "words": 0}
+    body = resp.json()
+    assert body["status"] == "ok" and body["words"] == 0
+    # /health also advertises the protocol so a client can spot a v2 server
+    # even before it has a token.
+    assert body["protocol"] == 2
 
 
 def test_no_configured_token_fails_closed(store):

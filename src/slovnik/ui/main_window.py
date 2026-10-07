@@ -43,7 +43,7 @@ class MainWindow(QMainWindow):
             status=self.status, with_sync=True)
         self.page_en = VocabularyPage(
             self, db_path, lang="en", settings=self._settings,
-            status=self.status, with_sync=False)
+            status=self.status, with_sync=True)
         self.tabs.addTab(self.page_cs, "🇨🇿 Чеський")
         self.tabs.addTab(self.page_en, "🇬🇧 English")
         self.setCentralWidget(self.tabs)

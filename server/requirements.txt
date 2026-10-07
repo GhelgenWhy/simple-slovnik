@@ -1,2 +1,5 @@
-fastapi>=0.110
-uvicorn>=0.29
+# Sync server dependencies — pinned so the deployed release is reproducible.
+# Install into the service venv:
+#   /opt/slovnik-sync/venv/bin/pip install -r requirements.txt
+fastapi==0.141.1
+uvicorn==0.52.4

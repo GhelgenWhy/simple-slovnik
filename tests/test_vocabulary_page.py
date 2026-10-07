@@ -90,8 +90,10 @@ def test_cs_legacy_attributes_still_work(qtbot, seeded_db):
     assert win.list_widget is win.page_cs.list_widget
     assert win.search is win.page_cs.search
     assert win.btn_pull is win.page_cs.btn_pull
-    # English page has no sync buttons yet.
-    assert win.page_en.btn_pull is None
+    # English has its own sync buttons now (per-language state, Stage E).
+    assert win.page_en.btn_pull is not None
+    assert win.page_en.btn_pull is not win.page_cs.btn_pull
+    assert win.page_en.lang.code == "en"
 
 
 # ----- English check button uses the English analyzer -----

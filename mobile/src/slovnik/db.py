@@ -4,36 +4,50 @@ Timestamps are UTC strings compared lexicographically by the sync
 layer (``slovnik.sync``, server side) — the format must never change.
 
 - ``created_at``: ``YYYY-MM-DD HH:MM:SS`` (``datetime('now')`` is UTC).
-- ``updated_at``: ``YYYY-MM-DD HH:MM:SS.ffffff`` (microsecond precision).
-  Second-level timestamps made add+delete within one second produce equal
-  LWW keys, so the tombstone could never beat the row it deletes; the
-  microseconds make every write strictly newer. Legacy second-precision
-  rows sort correctly against the longer newer values.
+- ``updated_at``: ``YYYY-MM-DD HH:MM:SS.fff`` (SQLite ``%f`` = milliseconds).
+  It is the LWW key together with ``device_id`` and is kept *strictly
+  increasing per row*: a fast edit that lands on the same millisecond (or a
+  clock rollback) still gets a timestamp 1 ms ahead of the previous one, so
+  two versions of a row can never compare equal. Legacy second-precision
+  rows sort correctly against the longer newer values and the format stays
+  the canonical one old clients already send.
 
 Sync-related schema (docs/MOBILE_PLAN.md, Phase 1):
 
 - ``words.deleted``  — tombstone flag (soft delete keeps sync history);
 - ``words.device_id``— device that last wrote the row (diagnostics + LWW tie-break);
 - ``words.dirty``    — pending local change not yet pushed to the server;
+- ``words.revision`` — local edit counter. A push snapshots
+  ``(id, revision)``; only rows whose revision is unchanged after the
+  request are marked as pushed, so an edit made while the network call is
+  in flight stays pending instead of being silently confirmed;
 - ``sync_state``     — key/value store (``last_sync_at``, ``device_id``);
-- ``sync_conflicts`` — locally lost versions, kept for the future conflict UI.
+- ``sync_conflicts`` — locally lost versions, kept for the conflict UI.
 
 Live rows are deduplicated by the headword with a *partial* unique index
 (``WHERE deleted = 0``) so that tombstones never block re-adding a word.
 Legacy databases with a table-level ``UNIQUE(cs)`` are rebuilt in place.
 
+Renaming a word keeps the sync protocol's identity model (identity =
+headword): the old name is written as a tombstone in the same transaction
+as the new active row, so other devices learn "old name deleted" instead
+of ending up with two live words.
+
 Languages: :mod:`slovnik.lang` maps each language to a private table and
 headword column (``cs`` → ``words.cs``, ``en`` → ``words_en.en``). Every
 public function takes ``lang="cs"`` and operates on that language's table
-only — Czech and English words share nothing. The English sync columns
-(``deleted``/``device_id``/``dirty``) are reserved for a future English
-sync; today only Czech sync is wired into the UI.
+only — Czech and English words share nothing, including sync state.
+
+All connections are closed explicitly (``_db`` context manager): an open
+handle keeps SQLite files locked on Windows and breaks backups/cleanup.
 """
 from __future__ import annotations
 
 import json
 import sqlite3
 import uuid
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 from .lang import get_language
@@ -52,14 +66,15 @@ CREATE TABLE IF NOT EXISTS words (
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
     deleted INTEGER NOT NULL DEFAULT 0,
     device_id TEXT NOT NULL DEFAULT '',
-    dirty INTEGER NOT NULL DEFAULT 0
+    dirty INTEGER NOT NULL DEFAULT 0,
+    revision INTEGER NOT NULL DEFAULT 0
 )
 """
 
 # Independent English vocabulary: mirrors ``words`` but with an ``en``
 # headword, in its own table, so English entries never collide with Czech
-# ones. The sync columns match the Czech table so English sync can be
-# added later without a schema change.
+# ones. The sync columns match the Czech table so the two languages use
+# the same protocol with separate cursors.
 WORDS_EN_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS words_en (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -72,7 +87,8 @@ CREATE TABLE IF NOT EXISTS words_en (
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
     deleted INTEGER NOT NULL DEFAULT 0,
     device_id TEXT NOT NULL DEFAULT '',
-    dirty INTEGER NOT NULL DEFAULT 0
+    dirty INTEGER NOT NULL DEFAULT 0,
+    revision INTEGER NOT NULL DEFAULT 0
 )
 """
 
@@ -116,18 +132,42 @@ _SYNC_COLUMNS = (
     ("deleted", "INTEGER NOT NULL DEFAULT 0"),
     ("device_id", "TEXT NOT NULL DEFAULT ''"),
     ("dirty", "INTEGER NOT NULL DEFAULT 0"),
+    ("revision", "INTEGER NOT NULL DEFAULT 0"),
 )
 
 _WORD_COLUMNS = ("id", "cs", "uk", "ru", "pos", "note", "created_at",
-                 "updated_at", "deleted", "device_id", "dirty")
+                 "updated_at", "deleted", "device_id", "dirty", "revision")
+
+# Strictly increasing per-row version stamp (see module docstring).
+_BUMP_UPDATED_AT = (
+    "CASE WHEN strftime('%Y-%m-%d %H:%M:%f', 'now') > updated_at "
+    "THEN strftime('%Y-%m-%d %H:%M:%f', 'now') "
+    "ELSE strftime('%Y-%m-%d %H:%M:%f', updated_at, '+0.001 seconds') END"
+)
 
 
 def _connect(db_path: str) -> sqlite3.Connection:
-    """Open a connection with row access by name and FK enforcement."""
+    """Open a connection with row access by name."""
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+@contextmanager
+def _db(db_path: str) -> Iterator[sqlite3.Connection]:
+    """Connection context: commits on success, always closes the handle.
+
+    ``with sqlite3.connect(...)`` only manages the transaction — it leaves
+    the file handle open, which locks the DB on Windows (backup/cleanup
+    failures) and leaks connections in long-lived processes.
+    """
+    conn = _connect(db_path)
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
@@ -154,6 +194,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
         if "UNIQUE" in table_sql.upper():
             _rebuild_words_without_unique(conn)
     conn.execute(WORDS_EN_TABLE_SQL)  # always exists; no legacy en schema
+    en_cols = _table_columns(conn, "words_en")
+    for name, ddl in _SYNC_COLUMNS:
+        if name not in en_cols:
+            conn.execute(f"ALTER TABLE words_en ADD COLUMN {name} {ddl}")
     conn.executescript(AUX_SCHEMA)
     _create_live_unique_index(conn, "words", "cs", "idx_words_cs_live")
     _create_live_unique_index(conn, "words_en", "en", "idx_words_en_live")
@@ -191,15 +235,14 @@ def _rebuild_words_without_unique(conn: sqlite3.Connection) -> None:
 
 def init_db(db_path: str) -> None:
     """Create the schema and migrate older databases (idempotent)."""
-    with _connect(db_path) as conn:
+    with _db(db_path) as conn:
         _migrate(conn)
-        conn.commit()
 
 
 def _physical_cols(headword: str) -> tuple[str, ...]:
     """Physical column list of a vocabulary table, headword column first."""
     return ("id", headword, "uk", "ru", "pos", "note", "created_at",
-            "updated_at", "deleted", "device_id", "dirty")
+            "updated_at", "deleted", "device_id", "dirty", "revision")
 
 
 def _row_to_word(row: sqlite3.Row | None, headword: str) -> Word | None:
@@ -217,7 +260,13 @@ def _row_to_word(row: sqlite3.Row | None, headword: str) -> Word | None:
         deleted=row["deleted"],
         device_id=row["device_id"],
         dirty=row["dirty"],
+        revision=row["revision"],
     )
+
+
+def normalize_headword(headword: str) -> str:
+    """Cross-device word identity: trimmed, case-insensitive."""
+    return (headword or "").strip().casefold()
 
 
 def add_word(
@@ -233,16 +282,16 @@ def add_word(
 
     ``cs`` is the headword regardless of language (``Word.cs`` is the
     canonical headword field; English words land in ``words_en.en``).
-    The row is marked ``dirty`` so a future sync client picks it up.
+    The row is marked ``dirty`` (revision 1) so a future sync client picks
+    it up.
     """
     L = get_language(lang)
-    with _connect(db_path) as conn:
+    with _db(db_path) as conn:
         cur = conn.execute(
-            f"INSERT INTO {L.table} ({L.headword}, uk, ru, pos, note, dirty) "
-            "VALUES (?, ?, ?, ?, ?, 1)",
+            f"INSERT INTO {L.table} ({L.headword}, uk, ru, pos, note, "
+            "dirty, revision) VALUES (?, ?, ?, ?, ?, 1, 1)",
             (cs, uk, ru, pos, note),
         )
-        conn.commit()
         return cur.lastrowid
 
 
@@ -251,7 +300,7 @@ def get_word(db_path: str, word_id: int, include_deleted: bool = False,
     """Fetch a word by id, or None if it doesn't exist (or is tombstoned)."""
     L = get_language(lang)
     cols = _physical_cols(L.headword)
-    with _connect(db_path) as conn:
+    with _db(db_path) as conn:
         sql = f"SELECT {', '.join(cols)} FROM {L.table} WHERE id = ?"
         if not include_deleted:
             sql += " AND deleted = 0"
@@ -264,29 +313,60 @@ _UPDATABLE_FIELDS = ("cs", "uk", "ru", "pos", "note")
 
 
 def update_word(db_path: str, word_id: int, lang: str = "cs", **fields) -> None:
-    """Update one or more fields of a row, bump ``updated_at`` and mark
-    the row ``dirty`` for the next sync push.
+    """Update one or more fields of a row, bump ``updated_at``/``revision``
+    and mark the row ``dirty`` for the next sync push.
 
     ``cs`` in ``fields`` is the headword (mapped to the language's headword
     column). Unknown field names are silently ignored. Calling with no
     fields is a no-op.
+
+    **Renaming** (headword change) keeps the sync protocol's headword
+    identity: in the same transaction the old name is stored as a tombstone
+    and the row moves to the new name, so the rename propagates as
+    "old name deleted + new name upserted" instead of leaving two live
+    words on the server. A rename onto an already existing live headword
+    raises ``sqlite3.IntegrityError`` and rolls everything back. A
+    case-only change (``kočka`` → ``Kočka``) updates in place — it is the
+    same identity for the server (COLLATE NOCASE), no tombstone needed.
     """
     L = get_language(lang)
     sets = {k: v for k, v in fields.items() if k in _UPDATABLE_FIELDS}
     if not sets:
         return
-    if L.headword != "cs" and "cs" in sets:
-        sets[L.headword] = sets.pop("cs")
-    assignments = ", ".join(f"{col} = ?" for col in sets)
-    params: list = list(sets.values()) + [word_id]
-    with _connect(db_path) as conn:
+    hw = L.headword
+    if hw != "cs" and "cs" in sets:
+        sets[hw] = sets.pop("cs")
+    new_head = sets.get(hw)
+    with _db(db_path) as conn:
+        row = conn.execute(
+            f"SELECT id, {hw} AS head, deleted FROM {L.table} WHERE id = ?",
+            (word_id,),
+        ).fetchone()
+        if row is None:
+            return
+        old_head = row["head"] or ""
+        renamed = (new_head is not None
+                   and normalize_headword(new_head) != normalize_headword(old_head))
+        if renamed and not row["deleted"] and normalize_headword(new_head):
+            # The old name must survive as a tombstone or other devices
+            # would keep showing it forever (audit P1). ``_BUMP_UPDATED_AT``
+            # cannot be used here: inside INSERT its column references have
+            # no row yet, so the tombstone simply takes the current clock.
+            conn.execute(
+                f"INSERT INTO {L.table} ({hw}, deleted, dirty, revision, "
+                f"updated_at, device_id) VALUES (?, 1, 1, 1, "
+                "strftime('%Y-%m-%d %H:%M:%f', 'now'), "
+                f"(SELECT device_id FROM {L.table} WHERE id = ?))",
+                (old_head, word_id),
+            )
+        assignments = ", ".join(f"{col} = ?" for col in sets)
+        params: list = list(sets.values()) + [word_id]
         conn.execute(
             f"UPDATE {L.table} SET {assignments}, "
-            f"updated_at = strftime('%Y-%m-%d %H:%M:%f', 'now'), dirty = 1 "
-            "WHERE id = ?",
+            f"updated_at = {_BUMP_UPDATED_AT}, revision = revision + 1, "
+            "dirty = 1 WHERE id = ?",
             params,
         )
-        conn.commit()
 
 
 def delete_word(db_path: str, word_id: int, hard: bool = False,
@@ -300,32 +380,54 @@ def delete_word(db_path: str, word_id: int, hard: bool = False,
     is silently ignored.
     """
     L = get_language(lang)
-    with _connect(db_path) as conn:
+    with _db(db_path) as conn:
         if hard:
             conn.execute(f"DELETE FROM {L.table} WHERE id = ?", (word_id,))
         else:
             conn.execute(
                 f"UPDATE {L.table} SET deleted = 1, dirty = 1, "
-                f"updated_at = strftime('%Y-%m-%d %H:%M:%f', 'now') "
+                f"revision = revision + 1, updated_at = {_BUMP_UPDATED_AT} "
                 "WHERE id = ?",
                 (word_id,),
             )
-        conn.commit()
 
 
-def list_words(db_path: str, limit: int = 500, lang: str = "cs") -> list[Word]:
-    """Return all live (non-deleted) words of ``lang``, sorted by its
-    headword (case-insensitive), capped at ``limit``."""
+def list_words(db_path: str, limit: int = 500, offset: int = 0,
+               lang: str = "cs") -> list[Word]:
+    """Return live (non-deleted) words of ``lang``, sorted by its
+    headword (case-insensitive), capped at ``limit`` (``offset`` for
+    paging)."""
     L = get_language(lang)
     cols = _physical_cols(L.headword)
-    with _connect(db_path) as conn:
+    with _db(db_path) as conn:
         rows = conn.execute(
             f"SELECT {', '.join(cols)} FROM {L.table} "
             "WHERE deleted = 0 "
-            f"ORDER BY {L.headword} COLLATE NOCASE LIMIT ?",
-            (limit,),
+            f"ORDER BY {L.headword} COLLATE NOCASE, id LIMIT ? OFFSET ?",
+            (limit, offset),
         ).fetchall()
         return [_row_to_word(r, L.headword) for r in rows]
+
+
+def count_words(db_path: str, query: str = "", lang: str = "cs") -> int:
+    """Number of live words of ``lang`` (optionally matching ``query``,
+    same matching as :func:`search_words`)."""
+    L = get_language(lang)
+    hw = L.headword
+    with _db(db_path) as conn:
+        if not query.strip():
+            row = conn.execute(
+                f"SELECT COUNT(*) AS n FROM {L.table} WHERE deleted = 0"
+            ).fetchone()
+            return row["n"]
+        pat = f"%{query}%"
+        row = conn.execute(
+            f"SELECT COUNT(*) AS n FROM {L.table} WHERE deleted = 0 AND ("
+            f"    {hw} LIKE ? COLLATE NOCASE OR uk LIKE ? COLLATE NOCASE "
+            "OR ru LIKE ? COLLATE NOCASE)",
+            (pat, pat, pat),
+        ).fetchone()
+        return row["n"]
 
 
 def iter_words(db_path: str, include_deleted: bool = False,
@@ -334,8 +436,6 @@ def iter_words(db_path: str, include_deleted: bool = False,
 
     Tombstones are skipped unless ``include_deleted`` is set.
     """
-    from collections.abc import Iterator
-
     L = get_language(lang)
     cols = _physical_cols(L.headword)
     conn = _connect(db_path)
@@ -351,23 +451,23 @@ def iter_words(db_path: str, include_deleted: bool = False,
 
 
 def search_words(db_path: str, query: str, limit: int = 100,
-                 lang: str = "cs") -> list[Word]:
+                 offset: int = 0, lang: str = "cs") -> list[Word]:
     """Case-insensitive substring search over ``lang``'s headword/uk/ru
     (live words only).
 
-    An empty / whitespace-only query returns ``list_words(db_path, limit)``.
-    Rows whose headword starts with the query are ranked first; the rest
-    are ordered by the headword (case-insensitive).
+    An empty / whitespace-only query returns ``list_words``. Rows whose
+    headword starts with the query are ranked first; the rest are ordered
+    by the headword (case-insensitive).
     """
     if not query.strip():
-        return list_words(db_path, limit, lang=lang)
+        return list_words(db_path, limit, offset=offset, lang=lang)
 
     L = get_language(lang)
     hw = L.headword
     cols = _physical_cols(hw)
     pat = f"%{query}%"
     prefix_pat = f"{query}%"
-    with _connect(db_path) as conn:
+    with _db(db_path) as conn:
         rows = conn.execute(
             f"SELECT {', '.join(cols)} FROM {L.table} "
             "WHERE deleted = 0 AND ("
@@ -376,9 +476,9 @@ def search_words(db_path: str, query: str, limit: int = 100,
             " OR ru LIKE ? COLLATE NOCASE) "
             "ORDER BY "
             f"    CASE WHEN {hw} LIKE ? COLLATE NOCASE THEN 0 ELSE 1 END, "
-            f"    {hw} COLLATE NOCASE "
-            "LIMIT ?",
-            (pat, pat, pat, prefix_pat, limit),
+            f"    {hw} COLLATE NOCASE, id "
+            "LIMIT ? OFFSET ?",
+            (pat, pat, pat, prefix_pat, limit, offset),
         ).fetchall()
         return [_row_to_word(r, hw) for r in rows]
 
@@ -388,7 +488,7 @@ def search_words(db_path: str, query: str, limit: int = 100,
 # ---------------------------------------------------------------------------
 
 def get_sync_state(db_path: str, key: str) -> str | None:
-    with _connect(db_path) as conn:
+    with _db(db_path) as conn:
         row = conn.execute(
             "SELECT value FROM sync_state WHERE key = ?", (key,)
         ).fetchone()
@@ -396,13 +496,17 @@ def get_sync_state(db_path: str, key: str) -> str | None:
 
 
 def set_sync_state(db_path: str, key: str, value: str) -> None:
-    with _connect(db_path) as conn:
+    with _db(db_path) as conn:
         conn.execute(
             "INSERT INTO sync_state (key, value) VALUES (?, ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             (key, value),
         )
-        conn.commit()
+
+
+def delete_sync_state(db_path: str, key: str) -> None:
+    with _db(db_path) as conn:
+        conn.execute("DELETE FROM sync_state WHERE key = ?", (key,))
 
 
 def get_or_create_device_id(db_path: str) -> str:
@@ -416,7 +520,7 @@ def get_or_create_device_id(db_path: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Sync row exchange: dirty rows out, pulled rows in (LWW by cs)
+# Sync row exchange: dirty rows out, pulled rows in (LWW by headword)
 # ---------------------------------------------------------------------------
 
 # Identity across devices is the headword (case-insensitive); local integer
@@ -430,11 +534,15 @@ def _row_dict(row: sqlite3.Row, headword: str) -> dict:
 
 
 def dirty_rows(db_path: str, lang: str = "cs") -> list[dict]:
-    """Rows of ``lang`` with unpushed local changes, as JSON-ready dicts."""
+    """Rows of ``lang`` with unpushed local changes, as JSON-ready dicts.
+
+    Each dict carries ``id`` and ``revision``; a push snapshots them so the
+    confirmation can be limited to exactly the versions that were sent.
+    """
     L = get_language(lang)
     hw = L.headword
     cols = _physical_cols(hw)
-    with _connect(db_path) as conn:
+    with _db(db_path) as conn:
         rows = conn.execute(
             f"SELECT {', '.join(cols)} FROM {L.table} "
             "WHERE dirty = 1 ORDER BY id"
@@ -442,13 +550,49 @@ def dirty_rows(db_path: str, lang: str = "cs") -> list[dict]:
         return [_row_dict(r, hw) for r in rows]
 
 
-def clear_dirty(db_path: str, lang: str = "cs") -> None:
-    """Mark all currently dirty rows of ``lang`` as pushed (after server
-    confirmation)."""
+def count_dirty(db_path: str, lang: str = "cs") -> int:
+    """How many rows of ``lang`` are pending push."""
     L = get_language(lang)
-    with _connect(db_path) as conn:
+    with _db(db_path) as conn:
+        return conn.execute(
+            f"SELECT COUNT(*) AS n FROM {L.table} WHERE dirty = 1"
+        ).fetchone()["n"]
+
+
+def clear_dirty(db_path: str, lang: str = "cs") -> None:
+    """Mark all currently dirty rows of ``lang`` as pushed.
+
+    Legacy blunt instrument: it also confirms rows that were edited *while*
+    the push request was in flight. The sync client uses
+    :func:`clear_dirty_snapshot` instead; keep this only for maintenance
+    paths that really own the whole table.
+    """
+    L = get_language(lang)
+    with _db(db_path) as conn:
         conn.execute(f"UPDATE {L.table} SET dirty = 0 WHERE dirty = 1")
-        conn.commit()
+
+
+def clear_dirty_snapshot(db_path: str, snapshots: Iterable[tuple[int, int]],
+                         lang: str = "cs") -> int:
+    """Confirm pushed rows by snapshot: clear ``dirty`` only where the row's
+    current ``(id, revision)`` still matches what was sent.
+
+    Rows edited/added/deleted while the request was in flight have a newer
+    revision (or a different id) and stay ``dirty`` — the server received
+    the old version, so the new one must be sent again. Returns the number
+    of rows actually confirmed.
+    """
+    L = get_language(lang)
+    cleared = 0
+    with _db(db_path) as conn:
+        for word_id, revision in snapshots:
+            cur = conn.execute(
+                f"UPDATE {L.table} SET dirty = 0 "
+                "WHERE id = ? AND revision = ? AND dirty = 1",
+                (word_id, revision),
+            )
+            cleared += cur.rowcount
+    return cleared
 
 
 def stamp_device_id(db_path: str, device_id: str, lang: str = "cs") -> None:
@@ -456,23 +600,28 @@ def stamp_device_id(db_path: str, device_id: str, lang: str = "cs") -> None:
     them, so the server-side LWW key of our own rows matches what we keep
     locally."""
     L = get_language(lang)
-    with _connect(db_path) as conn:
+    with _db(db_path) as conn:
         conn.execute(f"UPDATE {L.table} SET device_id = ? WHERE dirty = 1",
                      (device_id,))
-        conn.commit()
 
 
-def mark_all_dirty(db_path: str, lang: str = "cs") -> None:
-    """Mark every live (non-deleted) word of ``lang`` as pending push.
+def mark_all_dirty(db_path: str, lang: str = "cs",
+                   include_deleted: bool = False) -> int:
+    """Mark every word of ``lang`` as pending push; returns the row count.
 
-    Used once per database to bootstrap the first sync: rows created before
-    the sync feature shipped have ``dirty = 0`` (the migration default) and
-    would otherwise never reach the server.
+    Used once per database to bootstrap the first sync (rows created before
+    the sync feature shipped have ``dirty = 0`` and would otherwise never
+    reach the server) and for the explicit "upload everything" action.
+
+    ``include_deleted=True`` also sends tombstones — that is what a full
+    upload to a *new* server needs; the existing timestamps and author
+    (``device_id``) are preserved, only the pending flag changes.
     """
     L = get_language(lang)
-    with _connect(db_path) as conn:
-        conn.execute(f"UPDATE {L.table} SET dirty = 1 WHERE deleted = 0")
-        conn.commit()
+    where = "" if include_deleted else " WHERE deleted = 0"
+    with _db(db_path) as conn:
+        cur = conn.execute(f"UPDATE {L.table} SET dirty = 1{where}")
+        return cur.rowcount
 
 
 def _lww_key(updated_at: str, device_id: str) -> tuple[str, str]:
@@ -482,17 +631,51 @@ def _lww_key(updated_at: str, device_id: str) -> tuple[str, str]:
 
 
 def save_conflict(db_path: str, row: dict, reason: str) -> None:
-    """Keep a losing row version for the future conflict-resolution UI."""
-    with _connect(db_path) as conn:
+    """Keep a row version for the conflict-resolution UI."""
+    with _db(db_path) as conn:
         conn.execute(
             "INSERT INTO sync_conflicts (row_json, reason) VALUES (?, ?)",
             (json.dumps(row, ensure_ascii=False), reason),
         )
-        conn.commit()
+
+
+def list_conflicts(db_path: str, limit: int = 200) -> list[dict]:
+    """Newest first: ``{id, row, reason, conflict_at}`` for the conflict UI."""
+    with _db(db_path) as conn:
+        rows = conn.execute(
+            "SELECT id, row_json, reason, conflict_at FROM sync_conflicts "
+            "ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    out: list[dict] = []
+    for row in rows:
+        try:
+            payload = json.loads(row["row_json"])
+        except (TypeError, ValueError):
+            payload = {}
+        out.append({"id": row["id"], "row": payload,
+                    "reason": row["reason"],
+                    "conflict_at": row["conflict_at"]})
+    return out
+
+
+def prune_conflicts(db_path: str, days: int = 30) -> int:
+    """Drop conflict archives older than ``days`` (same retention as the
+    server). Returns the number of removed entries."""
+    if days <= 0:
+        return 0
+    with _db(db_path) as conn:
+        cur = conn.execute(
+            "DELETE FROM sync_conflicts WHERE conflict_at < "
+            "strftime('%Y-%m-%d %H:%M:%f', 'now', ?)",
+            (f"-{days} days",),
+        )
+        return cur.rowcount
 
 
 def apply_synced_row(db_path: str, row: dict,
                      keep_dirty_local: bool = False,
+                     expected_revision: int | None = None,
                      lang: str = "cs") -> str:
     """Apply one row pulled from the server using last-write-wins.
 
@@ -502,6 +685,9 @@ def apply_synced_row(db_path: str, row: dict,
     - ``"added"``   — new word inserted locally;
     - ``"applied"`` — existing local row overwritten by the newer remote row;
     - ``"skipped"`` — local row is equally new or newer, remote row dropped;
+    - ``"pending"`` — ``expected_revision`` was given and the local row has
+      moved on (edited while a push was in flight): nothing is touched so
+      the newer local version stays pending;
     - ``"ignored"`` — nothing to do (empty headword, or tombstone for an
       unknown headword).
 
@@ -511,7 +697,8 @@ def apply_synced_row(db_path: str, row: dict,
 
     A dirty local row that loses to the remote version (``keep_dirty_local
     =False``) is first saved to ``sync_conflicts`` so the user can still
-    recover it.
+    recover it. Local ``revision`` is not bumped by remote applies — it
+    counts *local* edits, which is what the push snapshot compares.
     """
     L = get_language(lang)
     table, hw = L.table, L.headword
@@ -532,7 +719,7 @@ def apply_synced_row(db_path: str, row: dict,
     }
     in_key = _lww_key(incoming["updated_at"], incoming["device_id"])
 
-    with _connect(db_path) as conn:
+    with _db(db_path) as conn:
         # Prefer a live row over a tombstone: after "delete + re-add" both
         # can share the same headword, and the live one is the row to merge into.
         local = conn.execute(
@@ -542,21 +729,35 @@ def apply_synced_row(db_path: str, row: dict,
             (head,),
         ).fetchone()
 
+        if local is not None and expected_revision is not None \
+                and local["revision"] != expected_revision:
+            return "pending"
+
         if local is None:
             if incoming["deleted"]:
                 return "ignored"  # tombstone for a word we never had
             placeholders = ", ".join("?" for _ in incoming)
             conn.execute(
-                f"INSERT INTO {table} ({', '.join(incoming)}, dirty) "
-                f"VALUES ({placeholders}, 0)",
+                f"INSERT INTO {table} ({', '.join(incoming)}, dirty, revision) "
+                f"VALUES ({placeholders}, 0, 1)",
                 tuple(incoming.values()),
             )
-            conn.commit()
             return "added"
 
         local_key = _lww_key(local["updated_at"], local["device_id"])
         if keep_dirty_local and local["dirty"]:
-            return "skipped"  # device wins: unpushed local edit beats remote
+            # Device wins: the unpushed local edit beats the remote version.
+            # Keep the remote (possibly newer) version archived so the user
+            # can still recover/compare it later — it will never be fetched
+            # again, the cursor has moved past it.
+            if in_key > local_key:
+                conn.execute(
+                    "INSERT INTO sync_conflicts (row_json, reason) "
+                    "VALUES (?, ?)",
+                    (json.dumps(incoming, ensure_ascii=False),
+                     "pull_kept_local"),
+                )
+            return "skipped"
         if in_key <= local_key:
             return "skipped"
 
@@ -574,5 +775,4 @@ def apply_synced_row(db_path: str, row: dict,
             f"UPDATE {table} SET {assignments} WHERE id = ?",
             tuple(updates.values()) + (local["id"],),
         )
-        conn.commit()
         return "applied"

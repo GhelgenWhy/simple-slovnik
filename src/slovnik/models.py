@@ -16,6 +16,11 @@ class Word:
     - ``device_id`` — id of the device that last wrote the row.
     - ``dirty`` — 1 while the local change has not been pushed to the
       sync server yet (local clock-skew-proof change tracking).
+    - ``revision`` — local edit counter, bumped on every local change
+      (including delete/rename). A push records ``(id, revision)`` and
+      only confirms rows whose revision is unchanged afterwards, so an
+      edit made during the network request is never silently marked as
+      pushed.
     """
     id: int | None = None
     cs: str = ""
@@ -28,3 +33,4 @@ class Word:
     deleted: int = 0
     device_id: str = ""
     dirty: int = 0
+    revision: int = 0

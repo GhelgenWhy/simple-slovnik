@@ -20,9 +20,10 @@ what you save on one page never mixes with the other.
 | se/si + preposition checks with fixes | ✅ Done |
 | Always-on-top pin button (📌 / Ctrl+T) | ✅ Done |
 | Read-only DB audit (`slovnik-dbcheck --lang`) | ✅ Done |
-| Sync server (FastAPI broker, tailnet-only) | ✅ Done (+ deployed) |
-| Desktop sync UI: ⬇ Pull / ⬆ Push buttons | ✅ Done |
-| Mobile APK (Flet) — built, [on-device check pending](mobile/README.md) | 🟡 APK ready |
+| Sync server (FastAPI broker, tailnet-only, v2 API) | ✅ Done (+ deployed) |
+| Sync UI: ⬇ Pull / ⬆ Push / ⬆⬆ full upload, both languages | ✅ Done |
+| Conflict archive viewer + restore | ✅ Done |
+| Mobile APK (Flet) — Czech **and** English, built, [on-device check pending](mobile/README.md) | 🟡 APK ready |
 | Desktop GUI (PySide6)  | ✅ Done             |
 
 ---
@@ -147,26 +148,36 @@ It will be auto-detected and used in preference to the pure backend.
 
 ## Synchronizace (desktop)
 
-Two buttons in the bottom toolbar drive a **manual, one-shot** sync with
-your own server (no background traffic, no real-time webhooks — simple
-and predictable):
+Buttons in the bottom toolbar drive a **manual, one-shot** sync with your
+own server (no background traffic, no real-time webhooks — simple and
+predictable). Both dictionaries sync, each with its own cursor:
 
 - **⬇ Pull** — fetch everything new from the server. **Conflict → the
   device version wins**: your unpushed local edits are never overwritten;
-  they stay pending and the next Push sends them.
-- **⬆ Push** — send your unpushed edits to the server. **Conflict → the
-  server version wins**: if the server already holds a newer version of a
-  word, that version replaces your stale local copy (the discarded edit is
-  archived in `sync_conflicts`, so nothing is silently lost).
-- **🔗 Sync…** — server URL + token settings (stored via QSettings).
+  they stay pending and the next Push sends them. The skipped server
+  version is archived, not dropped.
+- **⬆ Push** — send your unpushed edits. Conflicts are resolved by LWW
+  (newest timestamp wins); losing versions from **both** sides are kept in
+  the conflict archive, so nothing is silently lost. A row edited while
+  the request was in flight stays pending — only the exact version that
+  was sent gets confirmed.
+- **⬆⬆ Надіслати все…** — explicit full upload (words **and** tombstones)
+  for a brand-new or restored server. An ordinary Push refuses to run
+  against a server with a different identity or an emptied database
+  instead of reporting a silent, partial success.
+- **📚 Конфлікти** — browse the archive of losing versions and restore one.
+- **🔗 Sync…** — server URL + token settings (QSettings) with a
+  **📡 Перевірити з'єднання** button and actionable errors (wrong token,
+  no Tailscale, wrong URL, fail-closed server).
 
 The buttons run in a background thread; results appear in the status bar
-and the list refreshes automatically.
+and the list refreshes automatically. One sync per database runs at a time.
 
-**Deployed server:** `https://ghelgenserver.taile8591e.ts.net:8443`
+**Deployed server:** `https://ghelgenserver-1.taile8591e.ts.net:8443`
 (tailnet-only TLS via `tailscale serve`, systemd unit `slovnik-sync`,
-token in `/opt/slovnik-sync/.env` on the server) — see
-[server/README.md](server/README.md).
+token in `/opt/slovnik-sync/.env` on the server, nightly verified backups)
+— see [server/README.md](server/README.md) and
+[docs/RELEASE_STATE.md](docs/RELEASE_STATE.md).
 
 ---
 
@@ -215,7 +226,8 @@ CREATE TABLE words (
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f','now')),
     deleted    INTEGER NOT NULL DEFAULT 0,  -- tombstone for sync
     device_id  TEXT NOT NULL DEFAULT '',    -- last writer (sync diagnostics)
-    dirty      INTEGER NOT NULL DEFAULT 0   -- pending push to sync server
+    dirty      INTEGER NOT NULL DEFAULT 0,  -- pending push to sync server
+    revision   INTEGER NOT NULL DEFAULT 0   -- local edit counter (push snapshot)
 );
 -- One LIVE row per headword; tombstones are exempt so a deleted word
 -- can be re-added later:
@@ -231,11 +243,11 @@ CREATE TABLE words_en (          -- English dictionary (independent table)
 CREATE UNIQUE INDEX idx_words_en_live ON words_en(en COLLATE NOCASE)
     WHERE deleted = 0;
 
-CREATE TABLE sync_state (      -- sync cursors: last_sync_at, device_id
-    key   TEXT PRIMARY KEY,
+CREATE TABLE sync_state (      -- per-language cursors/bootstrap, device_id,
+    key   TEXT PRIMARY KEY,    --   server_uuid/generation, config/url+token
     value TEXT NOT NULL
 );
-CREATE TABLE sync_conflicts (  -- locally lost versions (conflict UI pending)
+CREATE TABLE sync_conflicts (  -- archived losing versions (📚 Конфлікти dialog)
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     row_json    TEXT NOT NULL,
     reason      TEXT NOT NULL DEFAULT 'push_conflict',
@@ -303,13 +315,25 @@ sync server API.)
 ```
 simple_slovnik/
 ├── pyproject.toml          # packaging
-├── docs/MOBILE_PLAN.md     # mobile APK + sync plan
-├── docs/ENGLISH_DICTIONARY_PLAN.md  # English-dictionary plan
+├── AGENTS.md               # project/agent notes (server, sync model, tools)
+├── docs/IMPROVEMENT_PLAN_2026-10-07.md  # A–G plan implemented here
+├── docs/PROJECT_AUDIT_2026-10-07.md     # the audit that drove it
+├── docs/RELEASE_STATE.md   # release/baseline state, backups, phone data
+├── docs/MOBILE_PLAN.md     # historical mobile APK + sync plan
 ├── data/slovnik.db         # SQLite DB (created at runtime, gitignored)
+├── backups/                # verified DB copies (gitignored)
 ├── dicts/cs_CZ/            # Czech hunspell dictionary
 ├── dicts/en_US/            # English (en_US, SCOWL) hunspell dictionary
+├── .github/workflows/ci.yml  # tests (Linux+Windows), mobile, APK job
+├── tools/                  # maintenance tools (see AGENTS.md section 2)
 ├── server/                 # sync server (FastAPI broker, tailnet-only)
-│   ├── app.py              #   POST /sync/push · GET /sync/pull · GET /health
+│   ├── app.py              #   v2 + legacy sync API, /sync/info, /health
+│   ├── install-server.sh   #   idempotent Debian install (venv+systemd+serve)
+│   ├── deploy.sh           #   update: backup → copy → restart → verify
+│   ├── backup_server_db.sh #   nightly verified backup (+ .service/.timer)
+│   ├── acceptance_server.py#   end-to-end scenario checks against a server
+│   ├── requirements.txt    #   pinned fastapi/uvicorn
+│   ├── slovnik-sync.service#   hardened systemd unit
 │   ├── Dockerfile          #   python:3.12-slim image
 │   ├── docker-compose.yml  #   volume for server.db + SLOVNIK_TOKEN
 │   └── README.md           #   deployment guide (Tailscale)
@@ -332,8 +356,10 @@ simple_slovnik/
 │       ├── vocabulary_page.py  # one language: search/list/CRUD/CSV/sync
 │       ├── word_dialog.py  # add/edit dialog (language-aware)
 │       ├── check_report.py # check-findings report dialog
-│       └── sync_dialog.py  # sync server settings
-└── tests/                  # pytest suite (290 tests)
+│       ├── conflict_dialog.py  # archive viewer + restore (📚 Конфлікти)
+│       └── sync_dialog.py  # sync server settings + connection check
+├── mobile/                 # Flet APK app (see mobile/README.md)
+└── tests/                  # pytest suite (+ mobile/tests, ~350 tests)
 ```
 
 ---
@@ -375,18 +401,22 @@ A: Not directly yet — see "Roadmap" below. The CSV format is simple enough
 to convert from any source with a small script.
 
 **Q: Where are my words saved?**
-A: `data/slovnik.db`. Back up this file. You can also export to CSV from
-the **📤 Експорт CSV** button.
+A: `data/slovnik.db`. Back it up with
+`python tools/backup_db.py data/slovnik.db` (uses the SQLite backup API,
+checks integrity and drops the sync token from the copy) or export to CSV
+from the **📤 Експорт CSV** button.
 
 **Q: Does this phone home?**
-A: No. The app makes zero network calls on its own. Sync exists as an
-opt-in feature (`slovnik.sync` + your own server inside your Tailscale);
-it is not wired into the UI yet and never talks to any third-party service.
+A: No. The app makes zero network calls on its own. Sync is an opt-in
+feature (`slovnik.sync` + your own server inside your Tailscale) and is
+wired into the UI on both the Czech and English tabs; it never talks to
+any third-party service.
 
 **Q: Can multiple people share a dictionary?**
-A: Not through the UI yet. The sync server (`server/`) already implements
-multi-device merge (last-write-wins per word, tombstones, conflicts kept
-for 30 days) — the missing piece is the settings/menu wiring (Phase 4).
+A: Yes, through the Sync buttons. The server merges by last-write-wins per
+word (tombstones for deletions, losing versions archived for 30 days) and
+each language (Czech/English) has its own cursor and tables. Detailed
+setup: [server/README.md](server/README.md).
 
 ---
 
@@ -396,11 +426,15 @@ for 30 days) — the missing piece is the settings/menu wiring (Phase 4).
       spellcheck, per-language CSV and audit
 - [x] **Sync foundations** — tombstone schema + `slovnik.sync` client +
       FastAPI sync server (deployed on the tailnet, see `server/README.md`)
-- [x] **Desktop sync UI** — ⬇ Pull / ⬆ Push buttons (pull = device wins,
-      push = server wins)
+- [x] **Sync UI (both languages)** — ⬇ Pull / ⬆ Push / ⬆⬆ full upload,
+      revision-snapshotted confirmations, conflict archive viewer
+- [x] **English sync end-to-end** — per-language cursors, tables and
+      bootstrap on the server and in both clients
 - [x] **Mobile APK built** — Flet app in [mobile/](mobile/README.md):
-      list/search, editor with Czech checks, manual pull/push sync
+      Czech **and** English tabs, paginated list, editor with per-language
+      checks, manual pull/push + full upload, CSV/backup
 - [ ] On-device verification (install APK on the phone, spike dict/sync)
+- [ ] Secure token storage (DPAPI/Keystore) instead of plaintext
 - [ ] Add a JSON-based "Anki deck" export
 - [ ] Tag system (categories: grammar, slang, formal, …)
 - [ ] Czech declension helper (shows all 7 cases for a noun)

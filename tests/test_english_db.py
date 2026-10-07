@@ -42,7 +42,7 @@ def test_init_db_creates_words_en(db_path):
     finally:
         conn.close()
     assert cols == ["id", "en", "uk", "ru", "pos", "note", "created_at",
-                    "updated_at", "deleted", "device_id", "dirty"]
+                    "updated_at", "deleted", "device_id", "dirty", "revision"]
 
 
 def test_init_db_creates_en_live_unique_index(db_path):

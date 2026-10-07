@@ -69,6 +69,10 @@ class SpellChecker:
         self._hunspell_obj = None
         self._pure_words: frozenset[str] = frozenset()
         self._pure_word_list: list[str] = []
+        #: Whether a dictionary was actually found; when False every check
+        #: is a no-op and the UI must say the spelling pass was skipped
+        #: ("no issues" would otherwise look like "checked, all correct").
+        self.loaded = self.dic_path.exists()
 
         if self.backend == "hunspell":
             self._hunspell_obj = _hunspell.HunSpell(

@@ -75,7 +75,19 @@ def copy() -> None:
     print("hotovo — mobilní kopie jádra je aktuální")
 
 
+def _force_utf8_streams() -> None:
+    """Windows consoles default to a legacy code page (cp1251 here) that
+    cannot encode the arrows/Czech in our messages — printing would crash
+    the tool with UnicodeEncodeError. Reconfigure to UTF-8 when possible."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError, OSError):
+            pass
+
+
 def main() -> int:
+    _force_utf8_streams()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true",
                         help="jen ověřit, že kopie je aktuální (exit 1 = není)")

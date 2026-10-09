@@ -109,6 +109,68 @@ def test_pull_follows_pages_past_ten_thousand_rows(tmp_path, make_server):
     assert int(db.get_sync_state(path, "cs/cursor")) >= total
 
 
+def test_pull_does_not_advance_past_concurrent_last_page_write(tmp_path,
+                                                               monkeypatch):
+    """A write between page selection and response construction must not be
+    hidden by a cursor advanced to max_seq from a later database snapshot."""
+    import server.app as server_module
+    from fastapi.testclient import TestClient
+
+    store = str(tmp_path / "cursor-race.db")
+    api = TestClient(create_app(store, token=TOKEN))
+
+    def push(word: str) -> None:
+        response = api.post("/sync/v2/push", headers=AUTH, json={
+            "lang": "cs", "device_id": "concurrent",
+            "rows": [{"cs": word, "updated_at": "2026-10-09 10:00:00",
+                      "device_id": "concurrent"}],
+        })
+        assert response.status_code == 200
+
+    push("first")
+    real_connect = server_module.connect
+    injected = False
+
+    class RowsCursor:
+        def __init__(self, cursor):
+            self.cursor = cursor
+
+        def fetchall(self):
+            nonlocal injected
+            rows = self.cursor.fetchall()
+            if not injected:
+                injected = True
+                push("between-select-and-cursor")
+            return rows
+
+        def __getattr__(self, name):
+            return getattr(self.cursor, name)
+
+    class Connection:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def execute(self, sql, *args):
+            cursor = self.connection.execute(sql, *args)
+            if "WHERE seq > ? ORDER BY seq LIMIT ?" in sql:
+                return RowsCursor(cursor)
+            return cursor
+
+        def __getattr__(self, name):
+            return getattr(self.connection, name)
+
+    monkeypatch.setattr(server_module, "connect",
+                        lambda path: Connection(real_connect(path)))
+    page = api.get("/sync/v2/pull", headers=AUTH,
+                   params={"lang": "cs", "cursor": 0}).json()
+    following = api.get("/sync/v2/pull", headers=AUTH,
+                        params={"lang": "cs",
+                                "cursor": page["next_cursor"]}).json()
+
+    delivered = [row["cs"] for row in page["rows"] + following["rows"]]
+    assert delivered == ["first", "between-select-and-cursor"]
+
+
 def test_pull_sees_updates_made_between_pages(tmp_path, make_server):
     """A row updated *after* the first page was delivered must still arrive:
     the cursor is a change sequence, not a row id and not a timestamp."""
@@ -182,10 +244,12 @@ def test_push_to_a_different_server_requires_full_upload(tmp_path, make_server):
     """Audit P2: after switching to a new URL the old code pushed 0 rows and
     reported success. Now it refuses until the user uploads everything."""
     url1, _ = make_server("one")
-    url2, _ = make_server("two")
+    url2, server2_db = make_server("two")
 
     path, client = _client(tmp_path, "client", url1)
     add_word(path, cs="kočka", uk="кіт")
+    deleted_id = add_word(path, cs="removed-before-server-switch")
+    db.delete_word(path, deleted_id)
     assert client.push().ok                      # server 1 gets the word
 
     other = SyncClient(path, url2, TOKEN, device_id="client")
@@ -193,14 +257,26 @@ def test_push_to_a_different_server_requires_full_upload(tmp_path, make_server):
     assert not result.ok and result.needs_full_upload
     assert "Nahrať" in result.error or "všetko" in result.error
 
+    # A repeated ordinary push must keep refusing until the explicit action.
+    repeated = other.push()
+    assert not repeated.ok and repeated.needs_full_upload
+    assert repeated.pushed == 0
+
     # The explicit full upload fills the new server.
     full = other.full_upload()
-    assert full.ok and full.pushed == 1
+    assert full.ok and full.pushed == 2
     assert json.loads(full.error or "null") is None
 
     fresh_path, fresh = _client(tmp_path, "reader", url2)
     assert fresh.pull().ok
     assert [w.cs for w in list_words(fresh_path)] == ["kočka"]
+    # The tombstone for a word that only existed on the old server must have
+    # been uploaded too, so the new server records that deletion history.
+    with sqlite3.connect(server2_db) as conn:
+        assert conn.execute(
+            "SELECT deleted FROM words WHERE cs = ?",
+            ("removed-before-server-switch",),
+        ).fetchone() == (1,)
 
 
 def test_emptied_server_database_is_detected(tmp_path, make_server):
@@ -241,6 +317,27 @@ def test_full_upload_sends_tombstones_and_keeps_timestamps(tmp_path, make_server
     fresh_path, fresh = _client(tmp_path, "reader", url)
     assert fresh.pull().ok
     assert [w.cs for w in list_words(fresh_path)] == ["zůstane"]
+
+
+def test_full_upload_preserves_original_authors(tmp_path, make_server):
+    url, store = make_server("authors")
+    path, client = _client(tmp_path, "uploader", url)
+    word_id = add_word(path, cs="authored")
+    with sqlite3.connect(path) as conn:
+        conn.execute("UPDATE words SET device_id = ?, dirty = 0 WHERE id = ?",
+                     ("original-device", word_id))
+    deleted_id = add_word(path, cs="authored-then-deleted")
+    db.delete_word(path, deleted_id)
+    with sqlite3.connect(path) as conn:
+        conn.execute("UPDATE words SET device_id = ? WHERE id = ?",
+                     ("delete-author", deleted_id))
+
+    result = client.full_upload()
+    assert result.ok
+    with sqlite3.connect(store) as conn:
+        authors = dict(conn.execute("SELECT cs, device_id FROM words"))
+    assert authors == {"authored": "original-device",
+                       "authored-then-deleted": "delete-author"}
 
 
 # ---------------------------------------------------------------------------
@@ -371,6 +468,19 @@ def test_failed_push_keeps_rows_pending(tmp_path, make_server):
     client._request = boom
     result = client.push()
     assert not result.ok and count_dirty(path) == 1
+
+
+def test_empty_push_response_is_rejected_and_keeps_rows_pending(tmp_path,
+                                                               make_server):
+    url, _ = make_server()
+    path, client = _client(tmp_path, "client", url)
+    add_word(path, cs="pending")
+    client._request = lambda *args, **kwargs: {}
+
+    result = client.push()
+
+    assert not result.ok
+    assert count_dirty(path) == 1
 
 
 def test_http_error_from_server_is_reported(tmp_path, server_url):

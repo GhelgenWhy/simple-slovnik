@@ -1,6 +1,6 @@
 [project]
 name = "slovnik-mobile"
-version = "0.2.0"
+version = "0.2.1"
 description = "Slovník — personal Czech/English ↔ uk/ru vocabulary (mobile APK)"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -27,8 +27,8 @@ product = "Slovník"
 company = "Slovník"
 copyright = "Copyright (C) 2026 Slovník"
 # versionCode / versionName of the APK (Android rejects same-code updates).
-build_number = 2
-build_version = "0.2.0"
+build_number = 3
+build_version = "0.2.1"
 
 [tool.flet.app]
 path = "src"

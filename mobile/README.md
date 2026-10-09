@@ -13,8 +13,8 @@ s archivem poražených verzí). Slovníky jsou dva nezávislé
 
 ```
 mobile/
-├── pyproject.toml          # Flet metadata (org cz.slovnik, version 0.2.0,
-│                           #   build_number 2 → versionCode)
+├── pyproject.toml          # Flet metadata (org cz.slovnik, version 0.2.1,
+│                           #   build_number 3 → versionCode)
 ├── src/
 │   ├── main.py             # celá aplikace (list / editor / sync)
 │   ├── assets/dicts/cs_CZ/ # hunspell slovník cs (~3.6 MB)

@@ -432,12 +432,9 @@ def create_app(db_path: str = DB_PATH, token: str = TOKEN) -> FastAPI:
             has_more = len(rows) > limit
             rows = rows[:limit]
             next_cursor = rows[-1]["seq"] if rows else cursor
-            if not has_more:
-                # No further changes: the cursor may safely jump to the
-                # current end of the log (it is what a later page would
-                # start from anyway).
-                next_cursor = max(next_cursor,
-                                  int(_meta_get(conn, f"{lang}/max_seq") or 0))
+            # Advance only to a row included in this page. Reading max_seq
+            # here can observe a concurrent commit made after the SELECT;
+            # jumping to it would permanently skip that unseen row.
             server_uuid = _meta_get(conn, "server_uuid") or ""
             generation = int(_meta_get(conn, "generation") or 1)
             return {

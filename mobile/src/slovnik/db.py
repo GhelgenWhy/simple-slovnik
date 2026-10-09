@@ -595,13 +595,17 @@ def clear_dirty_snapshot(db_path: str, snapshots: Iterable[tuple[int, int]],
     return cleared
 
 
-def stamp_device_id(db_path: str, device_id: str, lang: str = "cs") -> None:
+def stamp_device_id(db_path: str, device_id: str, lang: str = "cs",
+                    preserve_existing: bool = False) -> None:
     """Write ``device_id`` into all dirty rows of ``lang`` before pushing
     them, so the server-side LWW key of our own rows matches what we keep
     locally."""
     L = get_language(lang)
     with _db(db_path) as conn:
-        conn.execute(f"UPDATE {L.table} SET device_id = ? WHERE dirty = 1",
+        where = "dirty = 1"
+        if preserve_existing:
+            where += " AND device_id = ''"
+        conn.execute(f"UPDATE {L.table} SET device_id = ? WHERE {where}",
                      (device_id,))
 
 

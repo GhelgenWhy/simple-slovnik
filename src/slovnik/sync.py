@@ -158,6 +158,32 @@ def _require_rows(data: dict) -> list[dict]:
     return rows
 
 
+def _validate_push_response(data: dict, sent_rows: list[dict],
+                            info: dict, headword: str) -> list[dict]:
+    """Validate a complete server acknowledgement before changing local
+    dirty flags or applying any server conflict versions."""
+    data = _require_mapping(data, "výsledek Push")
+    applied, skipped = data.get("applied"), data.get("skipped")
+    if (type(applied) is not int or applied < 0
+            or type(skipped) is not int or skipped < 0):
+        raise SyncError("Server poslal neplatné potvrdenie Push.")
+    conflicts = _require_rows({"rows": data.get("conflicts")})
+    for row in conflicts:
+        _validate_row(row, headword)
+    if applied + skipped + len(conflicts) != len(sent_rows):
+        raise SyncError("Server nepotvrdil všetky odoslané riadky.")
+    server_time = data.get("server_time")
+    if not isinstance(server_time, str) or not server_time:
+        raise SyncError("Server poslal neplatný čas potvrdenia Push.")
+    if not info.get("legacy"):
+        if data.get("protocol") != PROTOCOL_VERSION:
+            raise SyncError("Server poslal neplatnú verziu potvrdenia Push.")
+        if (data.get("server_uuid") != info.get("server_uuid")
+                or data.get("generation") != info.get("generation")):
+            raise SyncError("Ответ Push относится к другому состоянию сервера.")
+    return conflicts
+
+
 _ROW_STR_FIELDS = ("uk", "ru", "pos", "note", "created_at", "updated_at",
                    "device_id")
 
@@ -344,6 +370,33 @@ class SyncClient:
             return "changed"
         return "same"
 
+    def _server_marker(self, server_uuid: str, generation: str | int) -> str:
+        return f"{server_uuid}:{generation}"
+
+    def _latch_server_change(self, info: dict) -> None:
+        """Remember that a previously synced language needs an explicit
+        full upload when its server identity or generation changes."""
+        synced_uuid = self._state("synced_uuid")
+        if not synced_uuid:
+            return
+        synced_generation = self._state("synced_generation")
+        if synced_generation is None:
+            # Compatibility with clients that saved only synced_uuid.
+            synced_generation = (db.get_sync_state(
+                self.db_path, "server_generation") or "0")
+        previous = self._server_marker(synced_uuid, synced_generation)
+        current = self._server_marker(
+            info.get("server_uuid") or "", info.get("generation") or 0)
+        if previous != current:
+            self._set_state("requires_full_upload", "1")
+
+    def _remember_server(self, info: dict) -> None:
+        server_uuid = info.get("server_uuid") or ""
+        if server_uuid:
+            self._set_state("synced_uuid", server_uuid)
+            self._set_state("synced_generation",
+                            str(info.get("generation") or 0))
+
     # -- operations ---------------------------------------------------------
 
     def pull(self, keep_dirty_local: bool = False) -> SyncResult:
@@ -443,14 +496,18 @@ class SyncClient:
                 info = self.info()
                 if not self.supports_language():
                     raise SyncError(self._unsupported_language_message(info))
+                self._latch_server_change(info)
                 self._identity_check(info)
                 marked = db.mark_all_dirty(self.db_path, self.lang,
                                            include_deleted=True)
                 self._notify("push", f"označených {marked} riadkov")
                 result = self._push(accept_server_conflicts=False,
-                                    allow_new_server=True)
-                if result.ok:
+                                    allow_new_server=True,
+                                    preserve_authors=True)
+                if result.ok and result.pending_left == 0:
                     self._set_state("bootstrap_done", "1")
+                    db.delete_sync_state(
+                        self.db_path, f"{self.lang}/requires_full_upload")
                 return result
         except SyncError as exc:
             self._notify("error", str(exc))
@@ -475,6 +532,7 @@ class SyncClient:
             result.error = self._unsupported_language_message(info)
             self._notify("error", result.error)
             return result
+        self._latch_server_change(info)
         identity = self._identity_check(info)
         if info.get("legacy"):
             self._pull_legacy(result, keep_dirty_local)
@@ -484,7 +542,8 @@ class SyncClient:
         if identity == "changed":
             result.needs_full_upload = True
         if result.ok and result.pulled > 0 and info.get("server_uuid"):
-            self._set_state("synced_uuid", info["server_uuid"])
+            self._remember_server(info)
+            self._set_state("bootstrap_done", "1")
         result.pending_left = db.count_dirty(self.db_path, self.lang)
         if result.ok:
             self._notify("pull", f"prijatých {result.pulled} riadkov")
@@ -500,10 +559,28 @@ class SyncClient:
             })
             rows = _require_rows(data)
             next_cursor = data.get("next_cursor")
-            if next_cursor is None:
-                raise SyncError("Server poslal neplatnú odpoveď (chýba kurzor).")
+            has_more = data.get("has_more")
+            current_cursor = int(cursor)
+            if type(next_cursor) is not int or next_cursor < current_cursor:
+                raise SyncError("Server poslal neplatný kurzor stránky.")
+            if type(has_more) is not bool:
+                raise SyncError("Server poslal neplatný príznak ďalšej stránky.")
+            if has_more and (not rows or next_cursor <= current_cursor):
+                raise SyncError("Server neposunul kurzor ďalšej stránky.")
+            if not rows and next_cursor != current_cursor:
+                raise SyncError("Prázdna stránka posunula kurzор cez neprevzaté dáta.")
+            sequences: list[int] = []
             for row in rows:
                 _validate_row(row, self.lang)
+                sequence = row.get("seq")
+                if type(sequence) is not int or sequence <= current_cursor:
+                    raise SyncError("Server poslal neplatné poradové číslo zmeny.")
+                if sequences and sequence <= sequences[-1]:
+                    raise SyncError("Server poslal stránku v nesprávnom poradí.")
+                sequences.append(sequence)
+            if sequences and next_cursor != sequences[-1]:
+                raise SyncError("Kurzor stránky neodpovedá poslednému riadku.")
+            for row in rows:
                 result.pulled += 1
                 outcome = db.apply_synced_row(
                     self.db_path, row, keep_dirty_local=keep_dirty_local,
@@ -516,7 +593,7 @@ class SyncClient:
             result.server_time = data.get("server_time") or result.server_time
             cursor = str(next_cursor)
             pages += 1
-            if not data.get("has_more"):
+            if not has_more:
                 break
             if pages > 10_000:            # runaway guard, never expected
                 raise SyncError("Server posiela príliš mnoho stránok.")
@@ -579,7 +656,8 @@ class SyncClient:
             break
 
     def _push(self, accept_server_conflicts: bool = False,
-              allow_new_server: bool = False) -> SyncResult:
+              allow_new_server: bool = False,
+              preserve_authors: bool = False) -> SyncResult:
         self._notify("push", "odosielam zmeny…")
         result = SyncResult()
         # Fresh capabilities/counts: an earlier pull on this instance may
@@ -590,9 +668,11 @@ class SyncClient:
             result.error = self._unsupported_language_message(info)
             self._notify("error", result.error)
             return result
+        self._latch_server_change(info)
         identity = self._identity_check(info)
         result.server_uuid = info.get("server_uuid") or None
-        if identity == "changed" and not allow_new_server:
+        requires_full_upload = self._state("requires_full_upload") is not None
+        if requires_full_upload and not allow_new_server:
             result.ok = False
             result.needs_full_upload = True
             result.error = ("Server má inú identitu (nový server alebo "
@@ -606,6 +686,7 @@ class SyncClient:
         self._bootstrap_once(info)
         db.prune_conflicts(self.db_path)
         if not allow_new_server and self._server_lost_its_data(info):
+            self._set_state("requires_full_upload", "1")
             result.ok = False
             result.needs_full_upload = True
             result.error = ("Server je pro tento jazyk prázdny, ale toto "
@@ -619,7 +700,8 @@ class SyncClient:
         for _ in range(MAX_PUSH_CHUNKS):
             # Stamp BEFORE reading: the payload then carries exactly the
             # device_id the local row keeps, so both LWW keys agree.
-            db.stamp_device_id(self.db_path, self.device_id, self.lang)
+            db.stamp_device_id(self.db_path, self.device_id, self.lang,
+                               preserve_existing=preserve_authors)
             rows = db.dirty_rows(self.db_path, self.lang)
             if not rows:
                 break
@@ -635,10 +717,9 @@ class SyncClient:
             else:
                 payload["lang"] = self.lang
                 data = self._request("POST", "/sync/v2/push", payload=payload)
+            conflicts = _validate_push_response(
+                data, chunk, info, get_language(self.lang).headword)
             result.pushed += len(chunk)
-            conflicts = data.get("conflicts") or []
-            if not isinstance(conflicts, list):
-                raise SyncError("Server poslal neplatnú odpoveď (konflikty).")
             result.conflicts.extend(conflicts)
             self._resolve_conflicts(chunk, conflicts, accept_server_conflicts)
             cleared = db.clear_dirty_snapshot(self.db_path, snapshot, self.lang)
@@ -651,7 +732,7 @@ class SyncClient:
         if info.get("server_uuid"):
             # Remember which server this language was actually synced with,
             # so an emptied/restored server DB is detected later.
-            self._set_state("synced_uuid", info["server_uuid"])
+            self._remember_server(info)
         result.pending_left = db.count_dirty(self.db_path, self.lang)
         self._notify("push", f"odoslaných {result.pushed} riadkov")
         return result

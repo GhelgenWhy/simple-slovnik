@@ -64,6 +64,9 @@ Deployment is Stage C of the plan; the client URL becomes
 
 ## Post-fix APK (0.2.0, built 2026-10-07)
 
+> Исторический снимок выпуска 0.2.0. Проверка 2026-10-09 и текущий APK
+> 0.2.1 описаны в конце этого файла.
+
 | Item | Value |
 |---|---|
 | File | `mobile/build/apk/slovnik-mobile.apk` |
@@ -138,3 +141,39 @@ write can be skipped at the end of v2 Pull, an empty Push response clears
 pending rows, a repeated ordinary Push bypasses the full-upload requirement,
 and full upload changes record authorship. These need fixes and a new
 APK/server release before declaring the sync improvements complete.
+
+## Final verification and device acceptance (2026-10-09)
+
+The four defects above were fixed in code commit `459bd9b` and covered by
+regression tests. `python -m pytest -q` passes **367 tests** (including
+`mobile/tests`). See [VERIFICATION_2026-10-09.md](VERIFICATION_2026-10-09.md)
+for the test matrix and on-device evidence.
+
+The rebuilt APK is 0.2.1 / versionCode 3, package
+`cz.slovnik.slovnik_mobile`, SHA-256
+`c9aa77884c4ff98de90f5de9a631aeb48e3163b0d5225bc15b5be4eff1c308bc`.
+Its packaged core check passes, both `cs_CZ` and `en_US` dictionaries are
+present, and its debug certificate matches the installed 0.1.0 APK. It was
+installed over 0.1.0 on the Redmi Note 14 Pro 5G; the prior data survived.
+The final official APK was restored after extracting and validating a
+post-sync, token-free in-app backup.
+
+On-device checks passed for keyboard visibility, “+” after leaving an
+existing editor, app restart, Czech/English list and spellcheck, Tailscale
+connection, and authenticated Pull over TLS for both languages (95 Czech,
+14 English; zero pending changes). The post-sync backup passed SQLite
+integrity checking and contains 95/14 active rows with no token key.
+
+The production server now runs the matching `server/app.py` SHA-256
+`b470c1c03639155707ea3141fe1a0d289b7e66048608a7993d62da3834158341`;
+systemd is active/enabled, `/health` and tailnet TLS work, unauthenticated
+`/sync/info` returns 401, and the existing 443 → Obsidian / 8443 → sync
+Serve mappings are intact. Nightly backups remain enabled and the latest
+server backup passed integrity checking.
+
+The mobile Push button was not used to send a test edit into the production
+dictionary. Push/Pull race, conflict, retry, full-upload and tombstone paths
+are covered by the 367-test suite and isolated server acceptance; a
+production-phone edit round trip would add or version user data. Protected
+credential storage (DPAPI/Android Keystore) and migration from the debug
+signing key to a preserved release keystore remain separate follow-up work.

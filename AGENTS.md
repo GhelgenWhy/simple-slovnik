@@ -363,6 +363,10 @@ curl -s https://ghelgenserver-1.taile8591e.ts.net:8443/health
 - Миграция debug-подписи APK на release-keystore требует отдельной
   спланированной миграции данных: другой сертификат Android не установит
   поверх имеющегося приложения.
+- Полный телефонный Push/Pull acceptance на изолированной БД ожидает
+  разрешения Android на установку QA APK по USB. `adb install` и `pm install`
+  вернули `INSTALL_FAILED_USER_RESTRICTED`; официальный APK 0.2.2 и
+  production-словарь не менялись. См. `docs/VERIFICATION_2026-10-09.md`.
 - UUID записей вместо идентичности по headword — отдельная миграция
   протокола, если потребуется непрерывная история переименований при
   конкурентных правках.

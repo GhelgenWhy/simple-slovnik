@@ -182,4 +182,8 @@ Push races, conflict handling, retry, full upload and tombstones are covered
 by regression tests and isolated server acceptance. Migrating from the
 shared debug signing key to a preserved release keystore remains a separate
 release-management task: changing the signer would prevent in-place updates
-and requires an explicit data backup/restore.
+and requires an explicit data backup/restore. An isolated phone Push/Pull
+test APK was blocked by Android (`INSTALL_FAILED_USER_RESTRICTED`); the
+temporary tailnet-only endpoint was removed and the installed production app
+and dictionary remain unchanged. Enabling USB installation for a separate
+QA package is the remaining device-level acceptance step.

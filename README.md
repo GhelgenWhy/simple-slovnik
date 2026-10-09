@@ -437,6 +437,8 @@ setup: [server/README.md](server/README.md).
       checks, manual pull/push + full upload, CSV/backup
 - [x] On-device verification (install/update, dictionaries, keyboard, TLS Pull)
 - [x] Secure token storage (Windows Credential Manager / Android Keystore)
+- [ ] Isolated phone Push/Pull round trip (requires enabling USB installation
+      for a one-off QA APK; see `docs/VERIFICATION_2026-10-09.md`)
 - [ ] Add a JSON-based "Anki deck" export
 - [ ] Tag system (categories: grammar, slang, formal, …)
 - [ ] Czech declension helper (shows all 7 cases for a noun)

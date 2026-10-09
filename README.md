@@ -166,7 +166,9 @@ predictable). Both dictionaries sync, each with its own cursor:
   against a server with a different identity or an emptied database
   instead of reporting a silent, partial success.
 - **📚 Конфлікти** — browse the archive of losing versions and restore one.
-- **🔗 Sync…** — server URL + token settings (QSettings) with a
+- **🔗 Sync…** — server URL in QSettings and bearer token in the Windows
+  Credential Manager (a legacy QSettings token is migrated after a verified
+  secure-store write), with a
   **📡 Перевірити з'єднання** button and actionable errors (wrong token,
   no Tailscale, wrong URL, fail-closed server).
 
@@ -244,7 +246,7 @@ CREATE UNIQUE INDEX idx_words_en_live ON words_en(en COLLATE NOCASE)
     WHERE deleted = 0;
 
 CREATE TABLE sync_state (      -- per-language cursors/bootstrap, device_id,
-    key   TEXT PRIMARY KEY,    --   server_uuid/generation, config/url+token
+    key   TEXT PRIMARY KEY,    --   server_uuid/generation, config/server_url
     value TEXT NOT NULL
 );
 CREATE TABLE sync_conflicts (  -- archived losing versions (📚 Конфлікти dialog)
@@ -433,8 +435,8 @@ setup: [server/README.md](server/README.md).
 - [x] **Mobile APK built** — Flet app in [mobile/](mobile/README.md):
       Czech **and** English tabs, paginated list, editor with per-language
       checks, manual pull/push + full upload, CSV/backup
-- [ ] On-device verification (install APK on the phone, spike dict/sync)
-- [ ] Secure token storage (DPAPI/Keystore) instead of plaintext
+- [x] On-device verification (install/update, dictionaries, keyboard, TLS Pull)
+- [x] Secure token storage (Windows Credential Manager / Android Keystore)
 - [ ] Add a JSON-based "Anki deck" export
 - [ ] Tag system (categories: grammar, slang, formal, …)
 - [ ] Czech declension helper (shows all 7 cases for a noun)

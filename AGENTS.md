@@ -269,13 +269,19 @@ curl -s https://ghelgenserver-1.taile8591e.ts.net:8443/health
 ## 7. Настройка клиентов
 
 - **Desktop:** кнопка **🔗 Sync…** на чешской или английской вкладке →
-  URL + токен; там же «📡 Перевірити з'єднання». Хранятся в QSettings
-  (`Slovnik` / `slovnik`), ключи `sync/server_url`, `sync/token`; на
-  Windows это `HKCU\Software\Slovnik\slovnik`. Кнопки **⬇ Pull / ⬆ Push /
-  ⬆⬆ Надіслати все / 📚 Конфлікти** — там же, работают в фоновом QThread.
-- **Mobile (APK):** вкладка Sync → URL + токен сохраняются **в саму БД**
-  (`sync_state`: `config/server_url`, `config/token`), там же курсоры
-  `{lang}/cursor`, `device_id` и выбранный язык (`config/lang`).
+  URL + токен; там же «📡 Перевірити з'єднання». URL хранится в QSettings
+  (`Slovnik` / `slovnik`, ключ `sync/server_url`), на Windows это
+  `HKCU\Software\Slovnik\slovnik`. Токен хранится в Windows Credential
+  Manager через keyring; прежний plaintext `sync/token` переносится туда
+  при первом открытии настроек и удаляется после проверки. Кнопки
+  **⬇ Pull / ⬆ Push / ⬆⬆ Надіслати все / 📚 Конфлікти** работают в
+  фоновом QThread.
+- **Mobile (APK):** вкладка Sync → URL хранится в БД (`sync_state`:
+  `config/server_url`), а токен — в Android Keystore через
+  `flet-secure-storage`. Старый `config/token` мигрируется при первом
+  открытии Sync и удаляется только после успешной записи и чтения из
+  Keystore. В БД остаются курсоры `{lang}/cursor`, `device_id` и язык
+  (`config/lang`).
   «Ověřit připojení», Pull/Push/Nahrát vše, CSV-экспорт/импорт и
   «Záloha databáze» (копия БД с вырезанным токеном) — на том же экране.
 - Обоим клиентам — URL `https://ghelgenserver-1.taile8591e.ts.net:8443`
@@ -329,10 +335,10 @@ curl -s https://ghelgenserver-1.taile8591e.ts.net:8443/health
 - `.hermes/` — скриншоты и планы прошлых сессий агентов, не трогать.
 - Удаление слов — только tombstone; `hard=True` в `db.delete_word` —
   исключение для ручной чистки.
-- Токен сервера не коммитить; живой токен — только на сервере в
-  `/opt/slovnik-sync/.env` (и в QSettings/`sync_state` клиентов —
-  plaintext, защищённое хранилище пока не сделано; при экспорте копий
-  токен вырезается).
+- Токен сервера не коммитить; живой токен хранится на сервере в
+  `/opt/slovnik-sync/.env`, на desktop — в системном Credential Manager,
+  на Android — в Keystore. При обновлении старые QSettings/SQLite значения
+  автоматически мигрируются; резервные копии базы не включают токен.
 - `backups/` и `mobile/build/` — в `.gitignore` (данные и артефакты).
 - APK содержит **копию** ядра: после любой правки ядра пересобрать APK,
   иначе на телефоне останется старая логика. Проверка —
@@ -343,18 +349,17 @@ curl -s https://ghelgenserver-1.taile8591e.ts.net:8443/health
 - Четыре дополнительных дефекта синхронизации, найденные независимой
   проверкой 2026-10-07, исправлены отдельным коммитом
   `459bd9b` и закрыты регрессионными тестами. Полный запуск
-  `python -m pytest -q` на 2026-10-09: **367 passed**. Подробности —
+  `python -m pytest -q` на 2026-10-09: **374 passed**. Подробности —
   [VERIFICATION_2026-10-09.md](docs/VERIFICATION_2026-10-09.md); старый
   отчёт [VERIFICATION_2026-10-07.md](docs/VERIFICATION_2026-10-07.md)
   сохранён как история проверки до исправлений.
-- APK 0.2.1 (versionCode 3) установлен поверх 0.1.0 на Redmi Note 14 Pro
+- APK 0.2.2 (versionCode 4) установлен поверх 0.2.1 на Redmi Note 14 Pro
   5G, прежние данные пережили обновление. На телефоне проверены клавиатура,
-  редактор «+» после редактирования, перезапуск, Tailscale и Pull обоих
-  языков: 95 чешских и 14 английских записей. Создана и проверена
-  post-sync копия без токена: `backups/mobile-phone-post-sync-2026-10-09.db`.
+  редактор «+» после редактирования, spellcheck, перезапуск, Tailscale,
+  миграция токена в Keystore и Pull обоих языков: 95 чешских и 14
+  английских записей. SQLite после миграции проверена отдельно:
+  `backups/mobile-phone-secure-store-2026-10-09.db`.
   Матрица приёмки и точные результаты — в отчёте 2026-10-09.
-- Перенос токена в системное защищённое хранилище (DPAPI/Keystore)
-  вместо plaintext в QSettings/`sync_state`.
 - Миграция debug-подписи APK на release-keystore требует отдельной
   спланированной миграции данных: другой сертификат Android не установит
   поверх имеющегося приложения.

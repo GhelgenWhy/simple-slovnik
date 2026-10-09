@@ -13,8 +13,8 @@ s archivem poražených verzí). Slovníky jsou dva nezávislé
 
 ```
 mobile/
-├── pyproject.toml          # Flet metadata (org cz.slovnik, version 0.2.1,
-│                           #   build_number 3 → versionCode)
+├── pyproject.toml          # Flet metadata (org cz.slovnik, version 0.2.2,
+│                           #   build_number 4 → versionCode)
 ├── src/
 │   ├── main.py             # celá aplikace (list / editor / sync)
 │   ├── assets/dicts/cs_CZ/ # hunspell slovník cs (~3.6 MB)
@@ -37,13 +37,17 @@ v dialogu výslovně napíše („kontrola proběhla jen podle pravidel“).
   token se z kopie maže), **📤 CSV export** a **📥 CSV import** (cesta
   k souboru). Soubory vznikají v privátním adresáři aplikace; ven je
   dostaneš přes `adb exec-out run-as cz.slovnik.slovnik_mobile cat <cesta>`.
-- Token a URL jsou v `sync_state` (plaintext) — pokud zařízení někomu
-  půjčuješ, smaž je nebo použij záložní kopii (token v ní není).
+- URL zůstává v `sync_state`; bearer token je v Android Keystore přes
+  `flet-secure-storage==0.86.5`. Při prvním otevření Sync starý
+  `config/token` přesune do Keystore až po úspěšném zápisu i čtení zpět;
+  pokud zabezpečené úložiště selže, původní hodnota v DB zůstává.
+  Zálohy DB a CSV token neobsahují. Po odinstalaci nebo přechodu na jiný
+  podpis může být nutné znovu zadat token.
 
 ## Vývoj na PC
 
 ```bash
-pip install flet==0.86.5
+pip install flet==0.86.5 flet-secure-storage==0.86.5
 cd mobile && flet run          # okno s appkou na desktopu
 ```
 
@@ -57,9 +61,10 @@ cd mobile
 flet build apk -v --yes        # první build stáhne Flutter + JDK + Android SDK
 ```
 
-Verze a versionCode jsou v `pyproject.toml` (`[tool.flet] build_number` /
-`build_version`); před vydáním je zvyš — Android nepovolí instalaci
-stejného versionCode. Po každé změně jádra nejdřív
+Aktuální verze 0.2.2 a versionCode 4 jsou ověřené na Redmi Note 14 Pro 5G.
+Závislost `flet-secure-storage==0.86.5` používá Android Keystore. Před
+dalším vydáním zvyš `build_number` / `build_version` v `pyproject.toml`;
+Android nepovolí instalaci stejného versionCode. Po každé změně jádra nejdřív
 `python tools/update_mobile_package.py`, po buildu ověř, že APK skutečně
 obsahuje aktuální kód:
 

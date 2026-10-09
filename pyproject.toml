@@ -12,6 +12,7 @@ authors = [{name = "Slovník User"}]
 license = {text = "MIT"}
 dependencies = [
     "PySide6>=6.6",
+    "keyring==25.7.0",
 ]
 
 [project.optional-dependencies]
@@ -26,6 +27,7 @@ dev = [
 # flet; without it they are skipped, with it they run as part of `pytest`.
 mobile-tests = [
     "flet==0.86.5",
+    "flet-secure-storage==0.86.5",
 ]
 # Spellcheck uses a pure-Python fallback by default; pyhunspell is the
 # native-accelerated backend and is only available where pre-built wheels

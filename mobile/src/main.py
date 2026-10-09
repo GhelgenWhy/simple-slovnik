@@ -10,7 +10,7 @@ changing between Flet versions and broke rendering in 0.86):
   spelling for English) as the desktop. Lists page in („Načíst další“) and
   show the result count instead of silently capping at 1000; the search
   field is debounced.
-- **Sync** — server URL + token (stored in the DB's sync_state table) and
+- **Sync** — server URL in the DB + bearer token in Android Keystore and
   manual ⬇ Pull / ⬆ Push / ⬆⬆ Nahrat vše buttons with the SAME semantics
   as the desktop: pull = the device's unpushed edits win (and the skipped
   server version is archived), push = LWW, with the losing versions kept
@@ -33,6 +33,7 @@ import tempfile
 from pathlib import Path
 
 import flet as ft
+from flet_secure_storage import SecureStorage
 
 from slovnik import db
 from slovnik.analyzers import analyzer
@@ -41,6 +42,7 @@ from slovnik.db import (
     count_dirty,
     count_words,
     delete_word,
+    delete_sync_state,
     get_sync_state,
     get_word,
     list_words,
@@ -56,7 +58,8 @@ from slovnik.spellcheck import SpellChecker
 from slovnik.sync import SyncClient, SyncError
 
 _URL_KEY = "config/server_url"
-_TOKEN_KEY = "config/token"
+_TOKEN_KEY = "config/token"  # legacy plaintext key; deleted after migration
+_SECURE_TOKEN_KEY = "slovnik.sync.bearer-token"
 _LANG_KEY = "config/lang"
 
 PAGE_SIZE = 300          # rows per page in the list
@@ -92,8 +95,11 @@ def _migrate_legacy_db(db_path: str) -> str | None:
 class SlovnikApp:
     """State + handlers for the whole app (one instance per page)."""
 
-    def __init__(self, page: ft.Page):
+    def __init__(self, page: ft.Page, secure_storage=None):
         self.page = page
+        self.secure_storage = secure_storage or SecureStorage()
+        page.services.append(self.secure_storage)
+        self._token_field_edited = False
         self.db_path = default_db_path()
         self.migrated_from = _migrate_legacy_db(self.db_path)
         db.init_db(self.db_path)
@@ -202,8 +208,11 @@ class SlovnikApp:
     # screen switching (no routing APIs)
     # ------------------------------------------------------------------
     def _on_tab(self, e: ft.ControlEvent) -> None:
-        self._show_screen("sync" if int(e.data) == 1 else "list",
-                          update_nav=False)
+        if int(e.data) == 1:
+            self._show_screen("sync", update_nav=False)
+            self.page.run_task(self._restore_token_field)
+        else:
+            self._show_screen("list", update_nav=False)
 
     def _appbar(self, title: str, with_lang: bool = True,
                 leading: ft.Control | None = None) -> ft.AppBar:
@@ -356,10 +365,11 @@ class SlovnikApp:
         )
         self.ed_token = ft.TextField(
             label="Token",
-            value=get_sync_state(self.db_path, _TOKEN_KEY) or "",
+            value="",
             password=True,
             can_reveal_password=True,
             border_radius=12,
+            on_change=lambda e: setattr(self, "_token_field_edited", True),
         )
         device_id = db.get_or_create_device_id(self.db_path)
         dirty = count_dirty(self.db_path, self.current_lang)
@@ -394,7 +404,8 @@ class SlovnikApp:
             self.ed_token,
             ft.Row([
                 ft.FilledTonalButton("Uložit nastavení", icon=ft.Icons.SAVE,
-                                     on_click=lambda e: self._save_sync_config(),
+                                     on_click=lambda e: self.page.run_task(
+                                         self._save_sync_config),
                                      expand=True),
                 ft.FilledTonalButton("Ověřit připojení", icon=ft.Icons.WIFI_TETHERING,
                                      on_click=lambda e: self._check_connection(),
@@ -554,23 +565,73 @@ class SlovnikApp:
             return
         self._snack(f"🗄 Záloha OK (token odstraněn) →\n{dest}")
 
-    def _save_sync_config(self) -> None:
-        set_sync_state(self.db_path, _URL_KEY,
-                       (self.ed_url.value or "").strip().rstrip("/"))
-        set_sync_state(self.db_path, _TOKEN_KEY,
-                       (self.ed_token.value or "").strip())
-        self._snack("Nastavení uloženo ✅")
+    async def _get_sync_token(self) -> str:
+        """Read Android Keystore and migrate the DB's legacy value once."""
+        legacy = (get_sync_state(self.db_path, _TOKEN_KEY) or "").strip()
+        try:
+            token = await self.secure_storage.get(_SECURE_TOKEN_KEY)
+            if token is None and legacy:
+                await self.secure_storage.set(_SECURE_TOKEN_KEY, legacy)
+                if await self.secure_storage.get(_SECURE_TOKEN_KEY) != legacy:
+                    raise RuntimeError("Secure storage read-back did not match")
+                delete_sync_state(self.db_path, _TOKEN_KEY)
+                token = legacy
+            elif token is not None and legacy:
+                delete_sync_state(self.db_path, _TOKEN_KEY)
+            return (token or "").strip()
+        except Exception as exc:  # noqa: BLE001 - native Keystore failures
+            raise SyncError(
+                "Secure token storage failed; the saved database token was "
+                "kept. Check Android Keystore and try again."
+            ) from exc
 
-    def _make_client(self) -> SyncClient:
+    async def _restore_token_field(self) -> None:
+        try:
+            token = await self._get_sync_token()
+        except SyncError as exc:
+            self._snack(f"❌ {exc}")
+            return
+        if not self._token_field_edited:
+            self.ed_token.value = token
+            self.page.update()
+
+    async def _save_sync_config(self) -> None:
         url = (self.ed_url.value or "").strip().rstrip("/")
         token = (self.ed_token.value or "").strip()
+        try:
+            if not token and not self._token_field_edited:
+                token = await self._get_sync_token()
+            if token:
+                await self.secure_storage.set(_SECURE_TOKEN_KEY, token)
+                if await self.secure_storage.get(_SECURE_TOKEN_KEY) != token:
+                    raise RuntimeError("Secure storage read-back did not match")
+            else:
+                await self.secure_storage.remove(_SECURE_TOKEN_KEY)
+            # Clear any old plaintext only after the protected operation has
+            # succeeded. Backups also scrub this legacy key.
+            delete_sync_state(self.db_path, _TOKEN_KEY)
+            set_sync_state(self.db_path, _URL_KEY, url)
+            self.ed_token.value = token
+            self._token_field_edited = False
+            self._snack("Nastavení uloženo ✅")
+        except Exception as exc:  # noqa: BLE001 - native Keystore failures
+            self._snack(f"❌ Bezpečné uložení tokenu selhalo: {exc}")
+
+    async def _make_client(self) -> SyncClient:
+        url = (self.ed_url.value or "").strip().rstrip("/")
+        token = (self.ed_token.value or "").strip()
+        if not token:
+            token = await self._get_sync_token()
         if not url or not token:
             raise SyncError("Nejdřív nastav URL serveru a token.")
         return SyncClient(self.db_path, url, token, lang=self.current_lang)
 
     def _check_connection(self) -> None:
+        self.page.run_task(self._check_connection_async)
+
+    async def _check_connection_async(self) -> None:
         try:
-            client = self._make_client()
+            client = await self._make_client()
         except SyncError as exc:
             self._snack(f"❌ {exc}")
             return
@@ -595,19 +656,27 @@ class SlovnikApp:
         self._snack(message)
 
     def _run_sync(self, mode: str) -> None:
+        self.page.run_task(self._run_sync_async, mode)
+
+    async def _run_sync_async(self, mode: str) -> None:
         if self._syncing:
             self._snack("⏳ Synchronizace už běží…")
-            return
-        try:
-            client = self._make_client()
-        except SyncError as exc:
-            self._snack(f"❌ {exc}")
             return
         self._syncing = True
         self.btn_pull.disabled = True
         self.btn_push.disabled = True
         self.btn_full.disabled = True
         self.page.update()
+        try:
+            client = await self._make_client()
+        except SyncError as exc:
+            self._syncing = False
+            self.btn_pull.disabled = False
+            self.btn_push.disabled = False
+            self.btn_full.disabled = False
+            self.page.update()
+            self._snack(f"❌ {exc}")
+            return
         self.page.run_thread(self._sync_thread, client, mode)
 
     def _confirm_full_upload(self) -> None:

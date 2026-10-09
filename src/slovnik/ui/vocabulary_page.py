@@ -356,13 +356,23 @@ class VocabularyPage(QWidget):
             self._refresh_list()
 
     def _start_sync(self, mode: str) -> None:
+        from ..credentials import CredentialStoreError, load_sync_token
         url = self._settings.value("sync/server_url", "", type=str)
-        token = self._settings.value("sync/token", "", type=str)
+        try:
+            token = load_sync_token(self._settings)
+        except CredentialStoreError as exc:
+            QMessageBox.warning(self, "Безпечне зберігання токена", str(exc))
+            return
         if not url or not token:
             if not self._on_sync_settings():
                 return
             url = self._settings.value("sync/server_url", "", type=str)
-            token = self._settings.value("sync/token", "", type=str)
+            try:
+                token = load_sync_token(self._settings)
+            except CredentialStoreError as exc:
+                QMessageBox.warning(
+                    self, "Безпечне зберігання токена", str(exc))
+                return
             if not url or not token:
                 return
         if self._sync_worker is not None and self._sync_worker.isRunning():

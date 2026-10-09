@@ -10,9 +10,9 @@ from PySide6.QtWidgets import (
 class SyncSettingsDialog(QDialog):
     """Edit the sync server URL and bearer token, optionally test them.
 
-    Values are stored in the app's QSettings under ``sync/server_url`` and
-    ``sync/token`` — the same settings object the main window already uses
-    for always-on-top.
+    The server URL is stored in QSettings. The bearer token is stored in the
+    operating system's credential manager and migrated from the old
+    ``sync/token`` setting after a verified write.
     """
 
     def __init__(self, parent, settings, lang: str = "cs") -> None:
@@ -67,8 +67,12 @@ class SyncSettingsDialog(QDialog):
 
         self.ed_url.setText(
             settings.value("sync/server_url", "", type=str))
-        self.ed_token.setText(
-            settings.value("sync/token", "", type=str))
+        from ..credentials import CredentialStoreError, load_sync_token
+        try:
+            self.ed_token.setText(load_sync_token(settings))
+        except CredentialStoreError as exc:
+            self.lbl_status.setText(f"❌ {exc}")
+            self.lbl_status.setStyleSheet("color: #b00020;")
 
     # ----- connection test (plan Stage G: clear URL/token/Tailscale errors)
     def _on_test(self) -> None:
@@ -128,8 +132,13 @@ class SyncSettingsDialog(QDialog):
         return f"❌ {message}"
 
     def accept(self) -> None:
-        self._settings.setValue(
-            "sync/server_url", self.ed_url.text().strip().rstrip("/"))
-        self._settings.setValue(
-            "sync/token", self.ed_token.text().strip())
+        from ..credentials import CredentialStoreError, save_sync_token
+        try:
+            save_sync_token(self._settings, self.ed_token.text())
+        except CredentialStoreError as exc:
+            self.lbl_status.setText(f"❌ {exc}")
+            self.lbl_status.setStyleSheet("color: #b00020;")
+            return
+        self._settings.setValue("sync/server_url",
+                                self.ed_url.text().strip().rstrip("/"))
         super().accept()

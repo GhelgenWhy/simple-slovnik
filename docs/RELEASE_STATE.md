@@ -65,7 +65,7 @@ Deployment is Stage C of the plan; the client URL becomes
 ## Post-fix APK (0.2.0, built 2026-10-07)
 
 > Исторический снимок выпуска 0.2.0. Проверка 2026-10-09 и текущий APK
-> 0.2.1 описаны в конце этого файла.
+> 0.2.2 описаны в конце этого файла.
 
 | Item | Value |
 |---|---|
@@ -144,36 +144,42 @@ APK/server release before declaring the sync improvements complete.
 
 ## Final verification and device acceptance (2026-10-09)
 
-The four defects above were fixed in code commit `459bd9b` and covered by
-regression tests. `python -m pytest -q` passes **367 tests** (including
-`mobile/tests`). See [VERIFICATION_2026-10-09.md](VERIFICATION_2026-10-09.md)
-for the test matrix and on-device evidence.
+The four sync defects above were fixed in code commit `459bd9b`, with the
+final acceptance documented in [VERIFICATION_2026-10-09.md](VERIFICATION_2026-10-09.md).
+The current full suite passes **374 tests**, including mobile smoke and
+handler tests.
 
-The rebuilt APK is 0.2.1 / versionCode 3, package
+The current APK is 0.2.2 / versionCode 4, package
 `cz.slovnik.slovnik_mobile`, SHA-256
-`c9aa77884c4ff98de90f5de9a631aeb48e3163b0d5225bc15b5be4eff1c308bc`.
-Its packaged core check passes, both `cs_CZ` and `en_US` dictionaries are
-present, and its debug certificate matches the installed 0.1.0 APK. It was
-installed over 0.1.0 on the Redmi Note 14 Pro 5G; the prior data survived.
-The final official APK was restored after extracting and validating a
-post-sync, token-free in-app backup.
+`96b8bcde233f6cfb3b83775790c9afa6bc6c91a8d29da1e0adcbe5641d533a33`,
+141,754,687 bytes. The packaged core check passes, both `cs_CZ` and
+`en_US` dictionaries are present, and the APK retains the debug certificate
+used by the installed app. It was installed over 0.2.1 on the Redmi Note 14
+Pro 5G, with the 95 Czech and 14 English entries retained.
 
 On-device checks passed for keyboard visibility, “+” after leaving an
-existing editor, app restart, Czech/English list and spellcheck, Tailscale
-connection, and authenticated Pull over TLS for both languages (95 Czech,
-14 English; zero pending changes). The post-sync backup passed SQLite
-integrity checking and contains 95/14 active rows with no token key.
+existing editor, app restart, Czech/English lists and spellcheck, Tailscale
+connection, and authenticated TLS Pull for both languages. The Android
+Keystore migration was verified; an extracted DB copy passed SQLite
+integrity checking with 95/14 active rows and no plaintext token key:
+`backups/mobile-phone-secure-store-2026-10-09.db` (git-ignored).
 
-The production server now runs the matching `server/app.py` SHA-256
+The desktop token was also migrated from QSettings to Windows Credential
+Manager, read back successfully, and removed from the legacy setting. A
+fresh authenticated TLS `/sync/info` request succeeded with that stored
+credential. URLs remain in ordinary client settings; backups and exports
+do not include bearer tokens.
+
+The production server runs the matching `server/app.py` SHA-256
 `b470c1c03639155707ea3141fe1a0d289b7e66048608a7993d62da3834158341`;
 systemd is active/enabled, `/health` and tailnet TLS work, unauthenticated
-`/sync/info` returns 401, and the existing 443 → Obsidian / 8443 → sync
-Serve mappings are intact. Nightly backups remain enabled and the latest
-server backup passed integrity checking.
+`/sync/info` returns 401, and existing 443 → Obsidian / 8443 → sync Serve
+mappings are intact. Nightly backups remain enabled and the latest server
+backup passed integrity checking.
 
-The mobile Push button was not used to send a test edit into the production
-dictionary. Push/Pull race, conflict, retry, full-upload and tombstone paths
-are covered by the 367-test suite and isolated server acceptance; a
-production-phone edit round trip would add or version user data. Protected
-credential storage (DPAPI/Android Keystore) and migration from the debug
-signing key to a preserved release keystore remain separate follow-up work.
+No test edit was pushed from the phone into the production dictionary.
+Push races, conflict handling, retry, full upload and tombstones are covered
+by regression tests and isolated server acceptance. Migrating from the
+shared debug signing key to a preserved release keystore remains a separate
+release-management task: changing the signer would prevent in-place updates
+and requires an explicit data backup/restore.

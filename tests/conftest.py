@@ -22,6 +22,26 @@ from slovnik.spellcheck import SpellChecker
 SYNC_TOKEN = "test-token-123"
 
 
+@pytest.fixture(autouse=True)
+def isolate_os_credentials(monkeypatch, request):
+    """Keep tests away from the developer's real OS credential manager."""
+    if "mobile" in request.node.path.parts:
+        return {}
+    from slovnik import credentials
+
+    values: dict[str, str] = {}
+    monkeypatch.setattr(
+        credentials, "_read_secure",
+        lambda: values.get(credentials.ACCOUNT_NAME))
+    monkeypatch.setattr(
+        credentials, "_write_secure",
+        lambda value: values.__setitem__(credentials.ACCOUNT_NAME, value))
+    monkeypatch.setattr(
+        credentials, "_delete_secure",
+        lambda: values.pop(credentials.ACCOUNT_NAME, None))
+    return values
+
+
 @pytest.fixture(scope="session")
 def checker() -> SpellChecker:
     """One SpellChecker for the whole session (dictionary load is slow)."""

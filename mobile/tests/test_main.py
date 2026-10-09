@@ -9,6 +9,7 @@ tested against the wrong code.
 """
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import sys
 from pathlib import Path
@@ -33,6 +34,7 @@ class _FakePage:
         self.floating_action_button = None
         self.overlay: list = []
         self.dialogs: list = []
+        self.services: list = []
         self.content = None
         self.updates = 0
 
@@ -45,12 +47,32 @@ class _FakePage:
     def run_thread(self, target, *args) -> None:
         target(*args)          # synchronous: tests must not race the UI
 
+    def run_task(self, handler, *args, **kwargs):
+        return asyncio.run(handler(*args, **kwargs))
+
     def show_dialog(self, dialog) -> None:
         self.dialogs.append(dialog)
 
     def pop_dialog(self) -> None:
         if self.dialogs:
             self.dialogs.pop()
+
+
+class _FakeSecureStorage:
+    def __init__(self):
+        self.values = {}
+        self.fail_writes = False
+
+    async def get(self, key):
+        return self.values.get(key)
+
+    async def set(self, key, value):
+        if self.fail_writes:
+            raise RuntimeError("Keystore unavailable")
+        self.values[key] = value
+
+    async def remove(self, key):
+        self.values.pop(key, None)
 
 
 def _load_mobile_main():
@@ -106,7 +128,8 @@ def app(mobile_main, tmp_path, monkeypatch):
     monkeypatch.setenv("SLOVNIK_DB", str(tmp_path / "mobile.db"))
     monkeypatch.setenv("SLOVNIK_DICTS", str(tmp_path / "no-such-dicts"))
     page = _FakePage()
-    instance = mobile_main.SlovnikApp(page)
+    secure_storage = _FakeSecureStorage()
+    instance = mobile_main.SlovnikApp(page, secure_storage=secure_storage)
     instance.page = page
     return instance
 
@@ -124,6 +147,46 @@ def test_mobile_package_is_the_loaded_one(mobile_main):
     """Guard against the desktop package shadowing the mobile copy."""
     db_module = sys.modules["slovnik.db"]
     assert "mobile" in Path(db_module.__file__).parts
+
+
+def test_legacy_mobile_token_moves_to_keystore_and_is_verified(app):
+    from slovnik.db import get_sync_state, set_sync_state
+
+    set_sync_state(app.db_path, "config/token", "legacy-phone-token")
+
+    token = asyncio.run(app._get_sync_token())
+
+    assert token == "legacy-phone-token"
+    assert app.secure_storage.values["slovnik.sync.bearer-token"] == token
+    assert get_sync_state(app.db_path, "config/token") is None
+
+
+def test_keystore_failure_keeps_legacy_mobile_token(app):
+    from slovnik.db import get_sync_state, set_sync_state
+    from slovnik.sync import SyncError
+
+    set_sync_state(app.db_path, "config/token", "legacy-phone-token")
+    app.secure_storage.fail_writes = True
+
+    with pytest.raises(SyncError):
+        asyncio.run(app._get_sync_token())
+
+    assert get_sync_state(app.db_path, "config/token") == "legacy-phone-token"
+
+
+def test_mobile_save_stores_token_outside_database(app):
+    from slovnik.db import get_sync_state
+
+    app._sync_tab()
+    app.ed_url.value = "https://sync.example.test"
+    app.ed_token.value = "mobile-token"
+    asyncio.run(app._save_sync_config())
+
+    assert app.secure_storage.values[
+        "slovnik.sync.bearer-token"] == "mobile-token"
+    assert get_sync_state(app.db_path, "config/token") is None
+    assert get_sync_state(app.db_path, "config/server_url") \
+        == "https://sync.example.test"
 
 
 def test_severity_colors_cover_all_kinds(mobile_main):

@@ -336,7 +336,9 @@ def test_sync_settings_dialog_persists(seeded_db, qtbot, tmp_path):
     dlg.accept()
     assert settings.value("sync/server_url", "", type=str) \
         == "https://example.ts.net:8443"
-    assert settings.value("sync/token", "", type=str) == "tok-123"
+    assert settings.value("sync/token", "", type=str) == ""
+    from slovnik.credentials import load_sync_token
+    assert load_sync_token(settings) == "tok-123"
 
 
 def test_push_button_sends_word_to_server(seeded_db, qtbot, tmp_path,

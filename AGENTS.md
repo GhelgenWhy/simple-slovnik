@@ -1,6 +1,6 @@
 # AGENTS.md — заметка для агента
 
-> Состояние на 2026-10-07 после этапов A–G плана
+> Состояние на 2026-10-11 после этапов A–G плана
 > [IMPROVEMENT_PLAN_2026-10-07.md](docs/IMPROVEMENT_PLAN_2026-10-07.md),
 > ветка `main`. Репозиторий: https://github.com/GhelgenWhy/simple-slovnik
 > Ниже — устройство проекта, модель синхронизации и **как поднять sync-сервер
@@ -363,10 +363,12 @@ curl -s https://ghelgenserver-1.taile8591e.ts.net:8443/health
 - Миграция debug-подписи APK на release-keystore требует отдельной
   спланированной миграции данных: другой сертификат Android не установит
   поверх имеющегося приложения.
-- Полный телефонный Push/Pull acceptance на изолированной БД ожидает
-  разрешения Android на установку QA APK по USB. `adb install` и `pm install`
-  вернули `INSTALL_FAILED_USER_RESTRICTED`; официальный APK 0.2.2 и
-  production-словарь не менялись. См. `docs/VERIFICATION_2026-10-09.md`.
+- Телефонный Push/Pull acceptance обоих языков завершён 2026-10-11 на
+  отдельном QA package и изолированной БД: по одной записи отправлено и
+  получено для `cs` и `en`; курсоры `cs=2`, `en=2`, pending=0. Блокер
+  установки снят через Developer options → Install via USB. QA-пакет и
+  временный tailnet Serve endpoint удалены; production-БД не менялась.
+  Полные результаты — `docs/VERIFICATION_2026-10-09.md`.
 - UUID записей вместо идентичности по headword — отдельная миграция
   протокола, если потребуется непрерывная история переименований при
   конкурентных правках.
